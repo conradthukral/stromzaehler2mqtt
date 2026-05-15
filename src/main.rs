@@ -1,19 +1,27 @@
 use rumqttc::{AsyncClient, MqttOptions};
+use serde::Deserialize;
 use std::time::Duration;
 use tokio::task::JoinSet;
 use tracing::{error, info};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 struct SensorConfig {
     name: String,
     serial_port: String,
     baud_rate: u32,
 }
 
+#[derive(Deserialize)]
 struct MqttConfig {
     host: String,
     port: u16,
     client_id: String,
+}
+
+#[derive(Deserialize)]
+struct Config {
+    mqtt: MqttConfig,
+    sensors: Vec<SensorConfig>,
 }
 
 #[tokio::main]
@@ -25,29 +33,13 @@ async fn main() {
         )
         .init();
 
-    let mqtt_config = MqttConfig {
-        host: "localhost".into(),
-        port: 1883,
-        client_id: "stromzaehler2mqtt".into(),
-    };
-
-    let sensors = vec![
-        SensorConfig {
-            name: "sensor_1".into(),
-            serial_port: "/dev/ttyUSB0".into(),
-            baud_rate: 9600,
-        },
-        SensorConfig {
-            name: "sensor_2".into(),
-            serial_port: "/dev/ttyUSB1".into(),
-            baud_rate: 9600,
-        },
-    ];
+    let raw = std::fs::read_to_string("config.yaml").expect("config.yaml not found");
+    let config: Config = serde_yaml::from_str(&raw).expect("invalid config.yaml");
 
     let mut mqtt_options = MqttOptions::new(
-        &mqtt_config.client_id,
-        &mqtt_config.host,
-        mqtt_config.port,
+        &config.mqtt.client_id,
+        &config.mqtt.host,
+        config.mqtt.port,
     );
     mqtt_options.set_keep_alive(Duration::from_secs(30));
 
@@ -67,7 +59,7 @@ async fn main() {
     });
 
     let mut tasks = JoinSet::new();
-    for sensor in sensors {
+    for sensor in config.sensors {
         let client = mqtt_client.clone();
         tasks.spawn(async move {
             run_sensor(sensor, client).await;

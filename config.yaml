@@ -1,0 +1,12 @@
+mqtt:
+  host: localhost
+  port: 1883
+  client_id: stromzaehler2mqtt
+
+sensors:
+  - name: sensor_1
+    serial_port: /dev/ttyUSB0
+    baud_rate: 9600
+  - name: sensor_2
+    serial_port: /dev/ttyUSB1
+    baud_rate: 9600
