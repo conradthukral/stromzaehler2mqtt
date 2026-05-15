@@ -1,3 +1,5 @@
+mod parser;
+
 use rumqttc::{AsyncClient, MqttOptions};
 use serde::Deserialize;
 use std::io;
@@ -100,19 +102,41 @@ async fn run_sensor(config: SensorConfig, _mqtt: AsyncClient) {
     let mut port = tokio::fs::File::from_std(std_file);
 
     info!(sensor = %config.name, "Serial port open, reading data");
-    let mut buf = [0u8; 256];
+    let mut accum: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 256];
     loop {
-        match port.read(&mut buf).await {
+        match port.read(&mut chunk).await {
             Ok(0) => {
                 info!(sensor = %config.name, "Serial port closed");
                 break;
             }
-            Ok(n) => dump_hex(&config.name, &buf[..n]),
+            Ok(n) => {
+                accum.extend_from_slice(&chunk[..n]);
+                let (telegrams, remaining) = parser::split_telegrams(&accum);
+                let drain_len = accum.len() - remaining.len();
+                for raw in telegrams {
+                    match parser::parse_telegram(raw) {
+                        Ok(t) => log_telegram(&config.name, &t),
+                        Err(e) => error!(sensor = %config.name, "Parse error: {e}"),
+                    }
+                }
+                accum.drain(..drain_len);
+            }
             Err(e) => {
                 error!(sensor = %config.name, "Read error: {e}");
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 break;
             }
+        }
+    }
+}
+
+fn log_telegram(label: &str, t: &parser::Telegram) {
+    info!("[{label}] device={}", t.device_id);
+    for r in &t.readings {
+        match &r.unit {
+            Some(u) => info!("[{label}]   {} = {} {}", r.obis, r.value, u),
+            None => info!("[{label}]   {} = {}", r.obis, r.value),
         }
     }
 }
@@ -151,13 +175,3 @@ fn configure_tty(fd: std::os::unix::io::RawFd, baud_rate: u32) -> io::Result<()>
     Ok(())
 }
 
-fn dump_hex(label: &str, data: &[u8]) {
-    for (i, chunk) in data.chunks(16).enumerate() {
-        let hex: String = chunk.iter().map(|b| format!("{b:02x} ")).collect();
-        let ascii: String = chunk
-            .iter()
-            .map(|b| if b.is_ascii_graphic() || *b == b' ' { *b as char } else { '.' })
-            .collect();
-        info!("[{label}] {:04x}  {hex:48} {ascii}", i * 16);
-    }
-}
