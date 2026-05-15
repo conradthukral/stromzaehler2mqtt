@@ -134,10 +134,7 @@ async fn run_sensor(config: SensorConfig, _mqtt: AsyncClient) {
 fn log_telegram(label: &str, t: &parser::Telegram) {
     info!("[{label}] device={}", t.device_id);
     for r in &t.readings {
-        match &r.unit {
-            Some(u) => info!("[{label}]   {} = {} {}", r.obis, r.value, u),
-            None => info!("[{label}]   {} = {}", r.obis, r.value),
-        }
+        info!("[{label}]   {r}");
     }
 }
 

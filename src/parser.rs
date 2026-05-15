@@ -1,69 +1,46 @@
 #[derive(Debug, PartialEq)]
-pub enum ObisCode {
+pub enum Reading {
     /// 1-0:0.0.0*255 — meter identification string
-    MeterId,
+    MeterId(String),
     /// 1-0:96.1.0*255 — serial number
-    SerialNumber,
-    /// 1-0:1.8.0*255 — cumulative active energy import
-    EnergyImport,
-    /// 1-0:2.8.0*255 — cumulative active energy export
-    EnergyExport,
-    /// 1-0:16.7.0*255 — instantaneous total active power
-    PowerTotal,
-    /// 1-0:36.7.0*255 — instantaneous L1 active power
-    PowerL1,
-    /// 1-0:56.7.0*255 — instantaneous L2 active power
-    PowerL2,
-    /// 1-0:76.7.0*255 — instantaneous L3 active power
-    PowerL3,
-    /// 1-0:96.5.0*255 — meter status flags
-    StatusFlags,
-    /// 0-0:96.8.0*255 — operating time in seconds
-    OperatingTime,
-    Unknown(String),
+    SerialNumber(String),
+    /// 1-0:1.8.0*255 — cumulative active energy import (kWh)
+    EnergyImport(f64),
+    /// 1-0:2.8.0*255 — cumulative active energy export (kWh)
+    EnergyExport(f64),
+    /// 1-0:16.7.0*255 — instantaneous total active power (W)
+    PowerTotal(f64),
+    /// 1-0:36.7.0*255 — instantaneous L1 active power (W)
+    PowerL1(f64),
+    /// 1-0:56.7.0*255 — instantaneous L2 active power (W)
+    PowerL2(f64),
+    /// 1-0:76.7.0*255 — instantaneous L3 active power (W)
+    PowerL3(f64),
+    /// 1-0:96.5.0*255 — meter status flags (hex-decoded)
+    StatusFlags(u32),
+    /// 0-0:96.8.0*255 — operating time in seconds (hex-decoded)
+    OperatingTime(u32),
+    /// Unrecognised OBIS code
+    Unknown { code: String, value: String, unit: Option<String> },
 }
 
-impl std::fmt::Display for ObisCode {
+impl std::fmt::Display for Reading {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ObisCode::MeterId       => write!(f, "Meter ID (0.0.0)"),
-            ObisCode::SerialNumber  => write!(f, "Serial Number (96.1.0)"),
-            ObisCode::EnergyImport  => write!(f, "Energy Import (1.8.0)"),
-            ObisCode::EnergyExport  => write!(f, "Energy Export (2.8.0)"),
-            ObisCode::PowerTotal    => write!(f, "Power Total (16.7.0)"),
-            ObisCode::PowerL1       => write!(f, "Power L1 (36.7.0)"),
-            ObisCode::PowerL2       => write!(f, "Power L2 (56.7.0)"),
-            ObisCode::PowerL3       => write!(f, "Power L3 (76.7.0)"),
-            ObisCode::StatusFlags   => write!(f, "Status Flags (96.5.0)"),
-            ObisCode::OperatingTime => write!(f, "Operating Time (96.8.0)"),
-            ObisCode::Unknown(s)    => write!(f, "{s}"),
+            Reading::MeterId(v)       => write!(f, "Meter ID (0.0.0) = {v}"),
+            Reading::SerialNumber(v)  => write!(f, "Serial Number (96.1.0) = {v}"),
+            Reading::EnergyImport(v)  => write!(f, "Energy Import (1.8.0) = {v} kWh"),
+            Reading::EnergyExport(v)  => write!(f, "Energy Export (2.8.0) = {v} kWh"),
+            Reading::PowerTotal(v)    => write!(f, "Power Total (16.7.0) = {v} W"),
+            Reading::PowerL1(v)       => write!(f, "Power L1 (36.7.0) = {v} W"),
+            Reading::PowerL2(v)       => write!(f, "Power L2 (56.7.0) = {v} W"),
+            Reading::PowerL3(v)       => write!(f, "Power L3 (76.7.0) = {v} W"),
+            Reading::StatusFlags(v)   => write!(f, "Status Flags (96.5.0) = {v:#010X}"),
+            Reading::OperatingTime(v) => write!(f, "Operating Time (96.8.0) = {v} s"),
+            Reading::Unknown { code, value, unit: Some(u) } => write!(f, "{code} = {value} {u}"),
+            Reading::Unknown { code, value, unit: None }    => write!(f, "{code} = {value}"),
         }
     }
-}
-
-impl From<&str> for ObisCode {
-    fn from(s: &str) -> Self {
-        match s {
-            "1-0:0.0.0*255"  => ObisCode::MeterId,
-            "1-0:96.1.0*255" => ObisCode::SerialNumber,
-            "1-0:1.8.0*255"  => ObisCode::EnergyImport,
-            "1-0:2.8.0*255"  => ObisCode::EnergyExport,
-            "1-0:16.7.0*255" => ObisCode::PowerTotal,
-            "1-0:36.7.0*255" => ObisCode::PowerL1,
-            "1-0:56.7.0*255" => ObisCode::PowerL2,
-            "1-0:76.7.0*255" => ObisCode::PowerL3,
-            "1-0:96.5.0*255" => ObisCode::StatusFlags,
-            "0-0:96.8.0*255" => ObisCode::OperatingTime,
-            other            => ObisCode::Unknown(other.to_string()),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub struct Reading {
-    pub obis: ObisCode,
-    pub value: String,
-    pub unit: Option<String>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -146,13 +123,26 @@ pub fn parse_telegram(data: &[u8]) -> Result<Telegram, ParseError> {
 
 fn parse_data_line(line: &str) -> Result<Reading, ParseError> {
     let err = || ParseError::MalformedLine(line.to_string());
-    let (obis, rest) = line.split_once('(').ok_or_else(err)?;
+    let (code, rest) = line.split_once('(').ok_or_else(err)?;
     let value_part = rest.strip_suffix(')').ok_or_else(err)?;
-    let (value, unit) = match value_part.split_once('*') {
-        Some((v, u)) => (v.to_string(), Some(u.to_string())),
-        None => (value_part.to_string(), None),
+    let (value_str, unit) = match value_part.split_once('*') {
+        Some((v, u)) => (v, Some(u.to_string())),
+        None => (value_part, None),
     };
-    Ok(Reading { obis: ObisCode::from(obis), value, unit })
+    let reading = match code {
+        "1-0:0.0.0*255"  => Reading::MeterId(value_str.to_string()),
+        "1-0:96.1.0*255" => Reading::SerialNumber(value_str.to_string()),
+        "1-0:1.8.0*255"  => Reading::EnergyImport(value_str.parse().map_err(|_| err())?),
+        "1-0:2.8.0*255"  => Reading::EnergyExport(value_str.parse().map_err(|_| err())?),
+        "1-0:16.7.0*255" => Reading::PowerTotal(value_str.parse().map_err(|_| err())?),
+        "1-0:36.7.0*255" => Reading::PowerL1(value_str.parse().map_err(|_| err())?),
+        "1-0:56.7.0*255" => Reading::PowerL2(value_str.parse().map_err(|_| err())?),
+        "1-0:76.7.0*255" => Reading::PowerL3(value_str.parse().map_err(|_| err())?),
+        "1-0:96.5.0*255" => Reading::StatusFlags(u32::from_str_radix(value_str, 16).map_err(|_| err())?),
+        "0-0:96.8.0*255" => Reading::OperatingTime(u32::from_str_radix(value_str, 16).map_err(|_| err())?),
+        other => Reading::Unknown { code: other.to_string(), value: value_str.to_string(), unit },
+    };
+    Ok(reading)
 }
 
 #[cfg(test)]
@@ -187,19 +177,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_reading_with_unit() {
+    fn parse_energy_import() {
         let t = parse_telegram(SAMPLE).unwrap();
-        let r = t.readings.iter().find(|r| r.obis == ObisCode::EnergyImport).unwrap();
-        assert_eq!(r.value, "002714.12830185");
-        assert_eq!(r.unit, Some("kWh".to_string()));
+        assert!(t.readings.contains(&Reading::EnergyImport(2714.12830185)));
     }
 
     #[test]
-    fn parse_reading_without_unit() {
+    fn parse_meter_id() {
         let t = parse_telegram(SAMPLE).unwrap();
-        let r = t.readings.iter().find(|r| r.obis == ObisCode::MeterId).unwrap();
-        assert_eq!(r.value, "1EBZ0102861889");
-        assert_eq!(r.unit, None);
+        assert!(t.readings.contains(&Reading::MeterId("1EBZ0102861889".to_string())));
+    }
+
+    #[test]
+    fn parse_status_flags() {
+        let t = parse_telegram(SAMPLE).unwrap();
+        assert!(t.readings.contains(&Reading::StatusFlags(0x001C0104)));
+    }
+
+    #[test]
+    fn parse_operating_time() {
+        let t = parse_telegram(SAMPLE).unwrap();
+        assert!(t.readings.contains(&Reading::OperatingTime(0x02FAB8BF)));
     }
 
     #[test]
