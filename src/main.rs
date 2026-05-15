@@ -42,11 +42,8 @@ async fn main() {
     let raw = std::fs::read_to_string("config.yaml").expect("config.yaml not found");
     let config: Config = serde_yaml::from_str(&raw).expect("invalid config.yaml");
 
-    let mut mqtt_options = MqttOptions::new(
-        &config.mqtt.client_id,
-        &config.mqtt.host,
-        config.mqtt.port,
-    );
+    let mut mqtt_options =
+        MqttOptions::new(&config.mqtt.client_id, &config.mqtt.host, config.mqtt.port);
     mqtt_options.set_keep_alive(Duration::from_secs(30));
 
     let (mqtt_client, mut eventloop) = AsyncClient::new(mqtt_options, 16);
@@ -152,7 +149,7 @@ fn configure_tty(fd: std::os::unix::io::RawFd, baud_rate: u32) -> io::Result<()>
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("unsupported baud rate: {baud_rate}"),
-            ))
+            ));
         }
     };
     unsafe {
@@ -171,4 +168,3 @@ fn configure_tty(fd: std::os::unix::io::RawFd, baud_rate: u32) -> io::Result<()>
     }
     Ok(())
 }
-

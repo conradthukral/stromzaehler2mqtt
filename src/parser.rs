@@ -21,24 +21,36 @@ pub enum Reading {
     /// 0-0:96.8.0*255 — operating time in seconds (hex-decoded)
     OperatingTime(u32),
     /// Unrecognised OBIS code
-    Unknown { code: String, value: String, unit: Option<String> },
+    Unknown {
+        code: String,
+        value: String,
+        unit: Option<String>,
+    },
 }
 
 impl std::fmt::Display for Reading {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Reading::MeterId(v)       => write!(f, "Meter ID (0.0.0) = {v}"),
-            Reading::SerialNumber(v)  => write!(f, "Serial Number (96.1.0) = {v}"),
-            Reading::EnergyImport(v)  => write!(f, "Energy Import (1.8.0) = {v} kWh"),
-            Reading::EnergyExport(v)  => write!(f, "Energy Export (2.8.0) = {v} kWh"),
-            Reading::PowerTotal(v)    => write!(f, "Power Total (16.7.0) = {v} W"),
-            Reading::PowerL1(v)       => write!(f, "Power L1 (36.7.0) = {v} W"),
-            Reading::PowerL2(v)       => write!(f, "Power L2 (56.7.0) = {v} W"),
-            Reading::PowerL3(v)       => write!(f, "Power L3 (76.7.0) = {v} W"),
-            Reading::StatusFlags(v)   => write!(f, "Status Flags (96.5.0) = {v:#010X}"),
+            Reading::MeterId(v) => write!(f, "Meter ID (0.0.0) = {v}"),
+            Reading::SerialNumber(v) => write!(f, "Serial Number (96.1.0) = {v}"),
+            Reading::EnergyImport(v) => write!(f, "Energy Import (1.8.0) = {v} kWh"),
+            Reading::EnergyExport(v) => write!(f, "Energy Export (2.8.0) = {v} kWh"),
+            Reading::PowerTotal(v) => write!(f, "Power Total (16.7.0) = {v} W"),
+            Reading::PowerL1(v) => write!(f, "Power L1 (36.7.0) = {v} W"),
+            Reading::PowerL2(v) => write!(f, "Power L2 (56.7.0) = {v} W"),
+            Reading::PowerL3(v) => write!(f, "Power L3 (76.7.0) = {v} W"),
+            Reading::StatusFlags(v) => write!(f, "Status Flags (96.5.0) = {v:#010X}"),
             Reading::OperatingTime(v) => write!(f, "Operating Time (96.8.0) = {v} s"),
-            Reading::Unknown { code, value, unit: Some(u) } => write!(f, "{code} = {value} {u}"),
-            Reading::Unknown { code, value, unit: None }    => write!(f, "{code} = {value}"),
+            Reading::Unknown {
+                code,
+                value,
+                unit: Some(u),
+            } => write!(f, "{code} = {value} {u}"),
+            Reading::Unknown {
+                code,
+                value,
+                unit: None,
+            } => write!(f, "{code} = {value}"),
         }
     }
 }
@@ -118,7 +130,10 @@ pub fn parse_telegram(data: &[u8]) -> Result<Telegram, ParseError> {
         readings.push(parse_data_line(line)?);
     }
 
-    Ok(Telegram { device_id, readings })
+    Ok(Telegram {
+        device_id,
+        readings,
+    })
 }
 
 fn parse_data_line(line: &str) -> Result<Reading, ParseError> {
@@ -130,17 +145,25 @@ fn parse_data_line(line: &str) -> Result<Reading, ParseError> {
         None => (value_part, None),
     };
     let reading = match code {
-        "1-0:0.0.0*255"  => Reading::MeterId(value_str.to_string()),
+        "1-0:0.0.0*255" => Reading::MeterId(value_str.to_string()),
         "1-0:96.1.0*255" => Reading::SerialNumber(value_str.to_string()),
-        "1-0:1.8.0*255"  => Reading::EnergyImport(value_str.parse().map_err(|_| err())?),
-        "1-0:2.8.0*255"  => Reading::EnergyExport(value_str.parse().map_err(|_| err())?),
+        "1-0:1.8.0*255" => Reading::EnergyImport(value_str.parse().map_err(|_| err())?),
+        "1-0:2.8.0*255" => Reading::EnergyExport(value_str.parse().map_err(|_| err())?),
         "1-0:16.7.0*255" => Reading::PowerTotal(value_str.parse().map_err(|_| err())?),
         "1-0:36.7.0*255" => Reading::PowerL1(value_str.parse().map_err(|_| err())?),
         "1-0:56.7.0*255" => Reading::PowerL2(value_str.parse().map_err(|_| err())?),
         "1-0:76.7.0*255" => Reading::PowerL3(value_str.parse().map_err(|_| err())?),
-        "1-0:96.5.0*255" => Reading::StatusFlags(u32::from_str_radix(value_str, 16).map_err(|_| err())?),
-        "0-0:96.8.0*255" => Reading::OperatingTime(u32::from_str_radix(value_str, 16).map_err(|_| err())?),
-        other => Reading::Unknown { code: other.to_string(), value: value_str.to_string(), unit },
+        "1-0:96.5.0*255" => {
+            Reading::StatusFlags(u32::from_str_radix(value_str, 16).map_err(|_| err())?)
+        }
+        "0-0:96.8.0*255" => {
+            Reading::OperatingTime(u32::from_str_radix(value_str, 16).map_err(|_| err())?)
+        }
+        other => Reading::Unknown {
+            code: other.to_string(),
+            value: value_str.to_string(),
+            unit,
+        },
     };
     Ok(reading)
 }
@@ -185,7 +208,10 @@ mod tests {
     #[test]
     fn parse_meter_id() {
         let t = parse_telegram(SAMPLE).unwrap();
-        assert!(t.readings.contains(&Reading::MeterId("1EBZ0102861889".to_string())));
+        assert!(
+            t.readings
+                .contains(&Reading::MeterId("1EBZ0102861889".to_string()))
+        );
     }
 
     #[test]
@@ -237,6 +263,9 @@ mod tests {
     #[test]
     fn missing_header() {
         assert_eq!(parse_telegram(b""), Err(ParseError::MissingHeader));
-        assert_eq!(parse_telegram(b"no slash\r\n!\r\n"), Err(ParseError::MissingHeader));
+        assert_eq!(
+            parse_telegram(b"no slash\r\n!\r\n"),
+            Err(ParseError::MissingHeader)
+        );
     }
 }
