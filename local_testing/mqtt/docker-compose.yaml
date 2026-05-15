@@ -1,0 +1,13 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    command: mosquitto -c /mosquitto-no-auth.conf
+
+  subscriber:
+    image: eclipse-mosquitto:2
+    depends_on:
+      - mosquitto
+    command: mosquitto_sub -h mosquitto -t '#' -v
+    restart: on-failure
