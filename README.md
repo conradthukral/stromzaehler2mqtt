@@ -6,3 +6,4 @@ Unterstützt werden initial:
 * Stromzähler eBZ DD3 2R06 ETA-ODZ1
 * Datenformat: EN62056-21 und EN62056-61
 
+Beispieldaten sind im Verzeichnis example_data abgelegt.
