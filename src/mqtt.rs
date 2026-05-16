@@ -1,6 +1,4 @@
-use rumqttc::{AsyncClient, ClientError, QoS};
 use serde_json::json;
-use tracing::error;
 
 use crate::parser::{Reading, Telegram};
 
@@ -24,6 +22,12 @@ impl Sensor {
     fn value_topic(&self, subtopic: &str) -> String {
         format!("{}/{}/{subtopic}", self.base_topic, self.sanitized_name)
     }
+}
+
+pub struct Publish {
+    pub topic: String,
+    pub payload: String,
+    pub retain: bool,
 }
 
 struct ReadingMeta {
@@ -105,28 +109,30 @@ fn discovery_entries(sensor: &Sensor, device_id: &str, node_id: &str) -> Vec<(St
         .collect()
 }
 
-pub async fn publish_discovery(
-    mqtt: &AsyncClient,
-    sensor: &Sensor,
-    device_id: &str,
-    node_id: &str,
-) -> Result<(), ClientError> {
-    for (topic, payload) in discovery_entries(sensor, device_id, node_id) {
-        mqtt.publish(topic, QoS::AtMostOnce, true, payload).await?;
-    }
-    Ok(())
+pub fn discovery_publishes(sensor: &Sensor, device_id: &str, node_id: &str) -> Vec<Publish> {
+    discovery_entries(sensor, device_id, node_id)
+        .into_iter()
+        .map(|(topic, payload)| Publish {
+            topic,
+            payload,
+            retain: true,
+        })
+        .collect()
 }
 
-pub async fn publish_readings(mqtt: &AsyncClient, sensor: &Sensor, telegram: &Telegram) {
-    for reading in &telegram.readings {
-        let Some((subtopic, value)) = reading_to_state(reading) else {
-            continue;
-        };
-        let topic = sensor.value_topic(subtopic);
-        if let Err(e) = mqtt.publish(&topic, QoS::AtMostOnce, false, value).await {
-            error!(sensor = %sensor.name, %topic, "MQTT publish error: {e}");
-        }
-    }
+pub fn reading_publishes(sensor: &Sensor, telegram: &Telegram) -> Vec<Publish> {
+    telegram
+        .readings
+        .iter()
+        .filter_map(|reading| {
+            let (subtopic, value) = reading_to_state(reading)?;
+            Some(Publish {
+                topic: sensor.value_topic(subtopic),
+                payload: value,
+                retain: false,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

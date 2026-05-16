@@ -1,16 +1,15 @@
 mod mqtt;
+mod mqtt_client;
 mod parser;
 
-use rumqttc::{AsyncClient, MqttOptions};
 use serde::Deserialize;
 use std::io;
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use tokio::io::unix::AsyncFd;
-use tokio::task::JoinSet;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 #[derive(Clone, Debug, Deserialize)]
 struct SensorConfig {
@@ -105,8 +104,7 @@ struct Config {
     publish_interval: Duration,
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
+fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -117,58 +115,67 @@ async fn main() {
     let raw = std::fs::read_to_string("config.yaml").expect("config.yaml not found");
     let config: Config = serde_yaml::from_str(&raw).expect("invalid config.yaml");
 
-    let mut mqtt_options =
-        MqttOptions::new(&config.mqtt.client_id, &config.mqtt.host, config.mqtt.port);
-    mqtt_options.set_keep_alive(Duration::from_secs(30));
-
-    let (mqtt_client, mut eventloop) = AsyncClient::new(mqtt_options, 16);
-
-    // Drive the MQTT event loop; reconnects on error.
-    tokio::spawn(async move {
-        loop {
-            match eventloop.poll().await {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("MQTT error: {e}");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-            }
-        }
-    });
+    let (tx, rx) = mpsc::channel::<mqtt::Publish>();
 
     let publish_interval = config.publish_interval;
     let base_topic = config.mqtt.base_topic;
-    let node_id = config.mqtt.client_id;
+    let node_id = config.mqtt.client_id.clone();
 
-    let mut tasks = JoinSet::new();
     for sensor in config.sensors {
-        let client = mqtt_client.clone();
+        let tx = tx.clone();
         let base_topic = base_topic.clone();
         let node_id = node_id.clone();
-        tasks.spawn(async move {
-            run_sensor(sensor, client, publish_interval, base_topic, node_id).await;
-        });
+        std::thread::Builder::new()
+            .name(sensor.name.clone())
+            .spawn(move || run_sensor(sensor, tx, publish_interval, base_topic, node_id))
+            .expect("failed to spawn sensor thread");
     }
+    drop(tx);
 
-    while let Some(result) = tasks.join_next().await {
-        if let Err(e) = result {
-            error!("Sensor task panicked: {e}");
+    run_mqtt_loop(rx, &config.mqtt.host, config.mqtt.port, &node_id);
+}
+
+fn run_mqtt_loop(rx: mpsc::Receiver<mqtt::Publish>, host: &str, port: u16, client_id: &str) {
+    loop {
+        let mut client = loop {
+            match mqtt_client::MqttClient::connect(host, port, client_id) {
+                Ok(c) => {
+                    info!("MQTT connected to {host}:{port}");
+                    break c;
+                }
+                Err(e) => {
+                    error!("MQTT connect failed: {e}");
+                    std::thread::sleep(Duration::from_secs(5));
+                }
+            }
+        };
+
+        loop {
+            match rx.recv() {
+                Ok(msg) => {
+                    if let Err(e) = client.publish(&msg.topic, msg.payload.as_bytes(), msg.retain) {
+                        error!("MQTT publish error: {e}, reconnecting");
+                        break;
+                    }
+                }
+                Err(_) => return, // all sensor threads exited
+            }
         }
     }
 }
 
-async fn run_sensor(
+fn run_sensor(
     config: SensorConfig,
-    mqtt_client: AsyncClient,
+    tx: mpsc::Sender<mqtt::Publish>,
     publish_interval: Duration,
     base_topic: String,
     node_id: String,
 ) {
     info!(sensor = %config.name, port = %config.serial_port, baud = config.baud_rate, "Opening serial port");
 
-    let std_file = match std::fs::OpenOptions::new()
+    let mut file = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .custom_flags(libc::O_NOCTTY)
         .open(&config.serial_port)
     {
         Ok(f) => f,
@@ -178,40 +185,26 @@ async fn run_sensor(
         }
     };
 
-    if let Err(e) = configure_tty(std_file.as_raw_fd(), config.baud_rate) {
+    if let Err(e) = configure_tty(file.as_raw_fd(), config.baud_rate) {
         error!(sensor = %config.name, "Failed to configure serial port: {e}");
         return;
     }
 
-    let port = match AsyncFd::new(std_file) {
-        Ok(f) => f,
-        Err(e) => {
-            error!(sensor = %config.name, "Failed to register serial port: {e}");
-            return;
-        }
-    };
     let sensor = mqtt::Sensor::new(&config.name, base_topic);
-
     info!(sensor = %sensor.name, "Serial port open, reading data");
+
     let mut accum: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 256];
     let mut discovery_sent = false;
     let mut throttle = PublishThrottle::new(publish_interval);
+
     loop {
-        let mut guard = match port.readable().await {
-            Ok(g) => g,
-            Err(e) => {
-                error!(sensor = %sensor.name, "Read error: {e}");
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                break;
-            }
-        };
-        match guard.try_io(|f| f.get_ref().read(&mut chunk)) {
-            Ok(Ok(0)) => {
+        match file.read(&mut chunk) {
+            Ok(0) => {
                 info!(sensor = %sensor.name, "Serial port closed");
                 break;
             }
-            Ok(Ok(n)) => {
+            Ok(n) => {
                 accum.extend_from_slice(&chunk[..n]);
                 let (telegrams, remaining) = parser::split_telegrams(&accum);
                 let drain_len = accum.len() - remaining.len();
@@ -220,23 +213,22 @@ async fn run_sensor(
                         Ok(t) => {
                             if !discovery_sent {
                                 info!(sensor = %sensor.name, device_id = %t.device_id, "Publishing discovery");
-                                match mqtt::publish_discovery(
-                                    &mqtt_client,
-                                    &sensor,
-                                    &t.device_id,
-                                    &node_id,
-                                )
-                                .await
+                                for msg in
+                                    mqtt::discovery_publishes(&sensor, &t.device_id, &node_id)
                                 {
-                                    Ok(()) => discovery_sent = true,
-                                    Err(e) => {
-                                        warn!(sensor = %sensor.name, "Discovery publish failed, will retry: {e}")
+                                    if tx.send(msg).is_err() {
+                                        return;
                                     }
                                 }
+                                discovery_sent = true;
                             }
                             if throttle.ready(Instant::now()) {
                                 log_telegram(&sensor.name, &t);
-                                mqtt::publish_readings(&mqtt_client, &sensor, &t).await;
+                                for msg in mqtt::reading_publishes(&sensor, &t) {
+                                    if tx.send(msg).is_err() {
+                                        return;
+                                    }
+                                }
                             }
                         }
                         Err(e) => error!(sensor = %sensor.name, "Parse error: {e}"),
@@ -244,12 +236,10 @@ async fn run_sensor(
                 }
                 accum.drain(..drain_len);
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 error!(sensor = %sensor.name, "Read error: {e}");
-                tokio::time::sleep(Duration::from_secs(5)).await;
                 break;
             }
-            Err(_would_block) => continue,
         }
     }
 }
@@ -287,7 +277,7 @@ fn configure_tty(fd: std::os::unix::io::RawFd, baud_rate: u32) -> io::Result<()>
         // 7E1: 7 data bits, even parity, 1 stop bit (EN62056-21 mode D)
         tios.c_cflag &= !(libc::CSIZE | libc::PARODD | libc::CSTOPB);
         tios.c_cflag |= libc::CS7 | libc::PARENB | libc::CREAD | libc::CLOCAL;
-        // Batch epoll wakeups: only wake when 32 bytes are buffered instead of 1
+        // Block until 32 bytes are buffered to reduce wakeups
         tios.c_cc[libc::VMIN] = 32;
         libc::cfsetspeed(&mut tios, speed);
         if libc::tcsetattr(fd, libc::TCSANOW, &tios) != 0 {
