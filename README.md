@@ -26,3 +26,13 @@ docker compose -f local_testing/mqtt/docker-compose.yaml up
 ```
 
 Die Konfiguration in `config.yaml` muss dann `host: localhost` und `port: 1883` verwenden.
+
+### Home Assistant starten
+
+Für Tests mit Home Assistant steht ein separates Docker-Compose-Setup bereit:
+
+```bash
+docker compose -f local_testing/homeassistant/docker-compose.yaml up
+```
+
+Home Assistant ist dann unter `http://localhost:8123` erreichbar. Nach dem ersten Start und der Accounterstellung die MQTT-Integration einrichten: **Settings → Devices & Services → Add Integration → MQTT**, Broker `host.docker.internal`, Port `1883`.

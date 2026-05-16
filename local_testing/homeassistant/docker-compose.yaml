@@ -1,0 +1,8 @@
+services:
+  homeassistant:
+    image: homeassistant/home-assistant:stable
+    ports:
+      - "8123:8123"
+    volumes:
+      - ./ha-config:/config
+    restart: unless-stopped
