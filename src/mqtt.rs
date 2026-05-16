@@ -6,19 +6,23 @@ use crate::parser::{Reading, Telegram};
 
 pub struct Sensor {
     pub name: String,
+    sanitized_name: String,
     pub base_topic: String,
 }
 
 impl Sensor {
     pub fn new(name: impl Into<String>, base_topic: impl Into<String>) -> Self {
+        let name = name.into();
+        let sanitized_name = sanitize_device_id(&name);
         Self {
-            name: name.into(),
+            name,
+            sanitized_name,
             base_topic: base_topic.into(),
         }
     }
 
     fn value_topic(&self, subtopic: &str) -> String {
-        format!("{}/{}/{subtopic}", self.base_topic, self.name)
+        format!("{}/{}/{subtopic}", self.base_topic, self.sanitized_name)
     }
 }
 
@@ -77,9 +81,8 @@ fn reading_to_state(reading: &Reading) -> Option<(&'static str, String)> {
 
 /// Returns (config_topic, payload_json) pairs for all discovery entries.
 fn discovery_entries(sensor: &Sensor, device_id: &str, node_id: &str) -> Vec<(String, String)> {
-    let sanitized_name = sanitize_device_id(&sensor.name);
     let sanitized_id = sanitize_device_id(device_id);
-    let device_key = format!("{sanitized_name}_{sanitized_id}");
+    let device_key = format!("{}_{sanitized_id}", sensor.sanitized_name);
     READINGS
         .iter()
         .map(|meta| {
