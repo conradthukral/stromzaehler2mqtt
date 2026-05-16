@@ -54,16 +54,14 @@ const READINGS: &[ReadingMeta] = &[
     },
 ];
 
-fn sanitize_device_id(device_id: &str) -> String {
-    device_id
+fn sanitize_device_id(s: &str) -> String {
+    s.to_lowercase()
+        .replace('ä', "ae")
+        .replace('ö', "oe")
+        .replace('ü', "ue")
+        .replace('ß', "ss")
         .chars()
-        .map(|c| {
-            if c.is_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
 }
 
@@ -140,6 +138,10 @@ mod tests {
         );
         assert_eq!(sanitize_device_id("EBZ-DD3.2R"), "ebz_dd3_2r");
         assert_eq!(sanitize_device_id("abc123"), "abc123");
+        assert_eq!(sanitize_device_id("Haushalt"), "haushalt");
+        assert_eq!(sanitize_device_id("Küche"), "kueche");
+        assert_eq!(sanitize_device_id("ÜBER"), "ueber");
+        assert_eq!(sanitize_device_id("Straße"), "strasse");
     }
 
     #[test]
