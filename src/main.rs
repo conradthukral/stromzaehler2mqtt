@@ -4,10 +4,11 @@ mod parser;
 use rumqttc::{AsyncClient, MqttOptions};
 use serde::Deserialize;
 use std::io;
+use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
+use tokio::io::unix::AsyncFd;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 
@@ -167,7 +168,7 @@ async fn run_sensor(
 
     let std_file = match std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOCTTY)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
         .open(&config.serial_port)
     {
         Ok(f) => f,
@@ -182,7 +183,13 @@ async fn run_sensor(
         return;
     }
 
-    let mut port = tokio::fs::File::from_std(std_file);
+    let port = match AsyncFd::new(std_file) {
+        Ok(f) => f,
+        Err(e) => {
+            error!(sensor = %config.name, "Failed to register serial port: {e}");
+            return;
+        }
+    };
     let sensor = mqtt::Sensor::new(&config.name, base_topic);
 
     info!(sensor = %sensor.name, "Serial port open, reading data");
@@ -191,12 +198,20 @@ async fn run_sensor(
     let mut discovery_sent = false;
     let mut throttle = PublishThrottle::new(publish_interval);
     loop {
-        match port.read(&mut chunk).await {
-            Ok(0) => {
+        let mut guard = match port.readable().await {
+            Ok(g) => g,
+            Err(e) => {
+                error!(sensor = %sensor.name, "Read error: {e}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                break;
+            }
+        };
+        match guard.try_io(|f| f.get_ref().read(&mut chunk)) {
+            Ok(Ok(0)) => {
                 info!(sensor = %sensor.name, "Serial port closed");
                 break;
             }
-            Ok(n) => {
+            Ok(Ok(n)) => {
                 accum.extend_from_slice(&chunk[..n]);
                 let (telegrams, remaining) = parser::split_telegrams(&accum);
                 let drain_len = accum.len() - remaining.len();
@@ -229,11 +244,12 @@ async fn run_sensor(
                 }
                 accum.drain(..drain_len);
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 error!(sensor = %sensor.name, "Read error: {e}");
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 break;
             }
+            Err(_would_block) => continue,
         }
     }
 }
