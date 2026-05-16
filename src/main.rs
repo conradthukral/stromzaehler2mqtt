@@ -23,6 +23,7 @@ struct MqttConfig {
     host: String,
     port: u16,
     client_id: String,
+    base_topic: String,
 }
 
 fn deserialize_duration_secs<'de, D>(d: D) -> Result<Duration, D::Error>
@@ -135,12 +136,14 @@ async fn main() {
     });
 
     let publish_interval = config.publish_interval;
+    let base_topic = config.mqtt.base_topic;
 
     let mut tasks = JoinSet::new();
     for sensor in config.sensors {
         let client = mqtt_client.clone();
+        let base_topic = base_topic.clone();
         tasks.spawn(async move {
-            run_sensor(sensor, client, publish_interval).await;
+            run_sensor(sensor, client, publish_interval, base_topic).await;
         });
     }
 
@@ -151,7 +154,12 @@ async fn main() {
     }
 }
 
-async fn run_sensor(config: SensorConfig, mqtt: AsyncClient, publish_interval: Duration) {
+async fn run_sensor(
+    config: SensorConfig,
+    mqtt_client: AsyncClient,
+    publish_interval: Duration,
+    base_topic: String,
+) {
     info!(sensor = %config.name, port = %config.serial_port, baud = config.baud_rate, "Opening serial port");
 
     let std_file = match std::fs::OpenOptions::new()
@@ -172,8 +180,9 @@ async fn run_sensor(config: SensorConfig, mqtt: AsyncClient, publish_interval: D
     }
 
     let mut port = tokio::fs::File::from_std(std_file);
+    let sensor = mqtt::Sensor::new(&config.name, base_topic);
 
-    info!(sensor = %config.name, "Serial port open, reading data");
+    info!(sensor = %sensor.name, "Serial port open, reading data");
     let mut accum: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 256];
     let mut discovery_sent = false;
@@ -181,7 +190,7 @@ async fn run_sensor(config: SensorConfig, mqtt: AsyncClient, publish_interval: D
     loop {
         match port.read(&mut chunk).await {
             Ok(0) => {
-                info!(sensor = %config.name, "Serial port closed");
+                info!(sensor = %sensor.name, "Serial port closed");
                 break;
             }
             Ok(n) => {
@@ -191,28 +200,29 @@ async fn run_sensor(config: SensorConfig, mqtt: AsyncClient, publish_interval: D
                 for raw in telegrams {
                     match parser::parse_telegram(raw) {
                         Ok(t) => {
-                            log_telegram(&config.name, &t);
                             if !discovery_sent {
-                                match mqtt::publish_discovery(&mqtt, &config.name, &t.device_id)
+                                info!(sensor = %sensor.name, device_id = %t.device_id, "Publishing discovery");
+                                match mqtt::publish_discovery(&mqtt_client, &sensor, &t.device_id)
                                     .await
                                 {
                                     Ok(()) => discovery_sent = true,
                                     Err(e) => {
-                                        warn!(sensor = %config.name, "Discovery publish failed, will retry: {e}")
+                                        warn!(sensor = %sensor.name, "Discovery publish failed, will retry: {e}")
                                     }
                                 }
                             }
                             if throttle.ready(Instant::now()) {
-                                mqtt::publish_readings(&mqtt, &config.name, &t).await;
+                                log_telegram(&sensor.name, &t);
+                                mqtt::publish_readings(&mqtt_client, &sensor, &t).await;
                             }
                         }
-                        Err(e) => error!(sensor = %config.name, "Parse error: {e}"),
+                        Err(e) => error!(sensor = %sensor.name, "Parse error: {e}"),
                     }
                 }
                 accum.drain(..drain_len);
             }
             Err(e) => {
-                error!(sensor = %config.name, "Read error: {e}");
+                error!(sensor = %sensor.name, "Read error: {e}");
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 break;
             }

@@ -2,6 +2,7 @@ mqtt:
   host: localhost
   port: 1883
   client_id: stromzaehler2mqtt
+  base_topic: stromzaehler2mqtt
 
 publish_interval_secs: 60
 

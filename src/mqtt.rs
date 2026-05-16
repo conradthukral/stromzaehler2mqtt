@@ -4,6 +4,24 @@ use tracing::error;
 
 use crate::parser::{Reading, Telegram};
 
+pub struct Sensor {
+    pub name: String,
+    pub base_topic: String,
+}
+
+impl Sensor {
+    pub fn new(name: impl Into<String>, base_topic: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            base_topic: base_topic.into(),
+        }
+    }
+
+    fn value_topic(&self, subtopic: &str) -> String {
+        format!("{}/{}/{subtopic}", self.base_topic, self.name)
+    }
+}
+
 struct ReadingMeta {
     subtopic: &'static str,
     name: &'static str,
@@ -60,7 +78,7 @@ fn reading_to_state(reading: &Reading) -> Option<(&'static str, String)> {
 }
 
 /// Returns (config_topic, payload_json) pairs for all discovery entries.
-fn discovery_entries(sensor_name: &str, device_id: &str) -> Vec<(String, String)> {
+fn discovery_entries(sensor: &Sensor, device_id: &str) -> Vec<(String, String)> {
     let sanitized = sanitize_device_id(device_id);
     READINGS
         .iter()
@@ -72,11 +90,11 @@ fn discovery_entries(sensor_name: &str, device_id: &str) -> Vec<(String, String)
                 "device_class": meta.device_class,
                 "state_class": meta.state_class,
                 "unit_of_measurement": meta.unit,
-                "state_topic": format!("stromzaehler/{sensor_name}/{}", meta.subtopic),
+                "state_topic": sensor.value_topic(meta.subtopic),
                 "unique_id": unique_id,
                 "device": {
                     "identifiers": [&sanitized],
-                    "name": sensor_name,
+                    "name": &sensor.name,
                 }
             });
             (config_topic, payload.to_string())
@@ -86,23 +104,23 @@ fn discovery_entries(sensor_name: &str, device_id: &str) -> Vec<(String, String)
 
 pub async fn publish_discovery(
     mqtt: &AsyncClient,
-    sensor_name: &str,
+    sensor: &Sensor,
     device_id: &str,
 ) -> Result<(), ClientError> {
-    for (topic, payload) in discovery_entries(sensor_name, device_id) {
+    for (topic, payload) in discovery_entries(sensor, device_id) {
         mqtt.publish(topic, QoS::AtMostOnce, true, payload).await?;
     }
     Ok(())
 }
 
-pub async fn publish_readings(mqtt: &AsyncClient, sensor_name: &str, telegram: &Telegram) {
+pub async fn publish_readings(mqtt: &AsyncClient, sensor: &Sensor, telegram: &Telegram) {
     for reading in &telegram.readings {
         let Some((subtopic, value)) = reading_to_state(reading) else {
             continue;
         };
-        let topic = format!("stromzaehler/{sensor_name}/{subtopic}");
+        let topic = sensor.value_topic(subtopic);
         if let Err(e) = mqtt.publish(&topic, QoS::AtMostOnce, false, value).await {
-            error!(sensor = %sensor_name, %topic, "MQTT publish error: {e}");
+            error!(sensor = %sensor.name, %topic, "MQTT publish error: {e}");
         }
     }
 }
@@ -158,7 +176,8 @@ mod tests {
 
     #[test]
     fn discovery_entries_count_and_topics() {
-        let entries = discovery_entries("main", "EBZ5DD32R06ETA_107");
+        let sensor = Sensor::new("main", "stromzaehler2mqtt");
+        let entries = discovery_entries(&sensor, "EBZ5DD32R06ETA_107");
         assert_eq!(entries.len(), 3);
 
         let topics: Vec<&str> = entries.iter().map(|(t, _)| t.as_str()).collect();
@@ -169,7 +188,8 @@ mod tests {
 
     #[test]
     fn discovery_payload_fields() {
-        let entries = discovery_entries("main", "EBZ5DD32R06ETA_107");
+        let sensor = Sensor::new("main", "stromzaehler2mqtt");
+        let entries = discovery_entries(&sensor, "EBZ5DD32R06ETA_107");
         let (_, payload_json) = entries
             .iter()
             .find(|(t, _)| t.contains("energy_import"))
@@ -179,7 +199,7 @@ mod tests {
         assert_eq!(v["device_class"], "energy");
         assert_eq!(v["state_class"], "total_increasing");
         assert_eq!(v["unit_of_measurement"], "kWh");
-        assert_eq!(v["state_topic"], "stromzaehler/main/energy_import");
+        assert_eq!(v["state_topic"], "stromzaehler2mqtt/main/energy_import");
         assert_eq!(v["unique_id"], "ebz5dd32r06eta_107_energy_import");
         assert_eq!(v["device"]["name"], "main");
         assert_eq!(v["device"]["identifiers"][0], "ebz5dd32r06eta_107");
