@@ -1,3 +1,4 @@
+mod mqtt;
 mod parser;
 
 use rumqttc::{AsyncClient, MqttOptions};
@@ -8,7 +9,7 @@ use std::os::unix::io::AsRawFd;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::task::JoinSet;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Clone, Debug, Deserialize)]
 struct SensorConfig {
@@ -76,7 +77,7 @@ async fn main() {
     }
 }
 
-async fn run_sensor(config: SensorConfig, _mqtt: AsyncClient) {
+async fn run_sensor(config: SensorConfig, mqtt: AsyncClient) {
     info!(sensor = %config.name, port = %config.serial_port, baud = config.baud_rate, "Opening serial port");
 
     let std_file = match std::fs::OpenOptions::new()
@@ -101,6 +102,7 @@ async fn run_sensor(config: SensorConfig, _mqtt: AsyncClient) {
     info!(sensor = %config.name, "Serial port open, reading data");
     let mut accum: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 256];
+    let mut discovery_sent = false;
     loop {
         match port.read(&mut chunk).await {
             Ok(0) => {
@@ -113,7 +115,20 @@ async fn run_sensor(config: SensorConfig, _mqtt: AsyncClient) {
                 let drain_len = accum.len() - remaining.len();
                 for raw in telegrams {
                     match parser::parse_telegram(raw) {
-                        Ok(t) => log_telegram(&config.name, &t),
+                        Ok(t) => {
+                            log_telegram(&config.name, &t);
+                            if !discovery_sent {
+                                match mqtt::publish_discovery(&mqtt, &config.name, &t.device_id)
+                                    .await
+                                {
+                                    Ok(()) => discovery_sent = true,
+                                    Err(e) => {
+                                        warn!(sensor = %config.name, "Discovery publish failed, will retry: {e}")
+                                    }
+                                }
+                            }
+                            mqtt::publish_readings(&mqtt, &config.name, &t).await;
+                        }
                         Err(e) => error!(sensor = %config.name, "Parse error: {e}"),
                     }
                 }
