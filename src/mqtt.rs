@@ -79,11 +79,13 @@ fn reading_to_state(reading: &Reading) -> Option<(&'static str, String)> {
 
 /// Returns (config_topic, payload_json) pairs for all discovery entries.
 fn discovery_entries(sensor: &Sensor, device_id: &str) -> Vec<(String, String)> {
-    let sanitized = sanitize_device_id(device_id);
+    let sanitized_name = sanitize_device_id(&sensor.name);
+    let sanitized_id = sanitize_device_id(device_id);
+    let device_key = format!("{sanitized_name}_{sanitized_id}");
     READINGS
         .iter()
         .map(|meta| {
-            let unique_id = format!("{sanitized}_{}", meta.subtopic);
+            let unique_id = format!("{device_key}_{}", meta.subtopic);
             let config_topic = format!("homeassistant/sensor/{unique_id}/config");
             let payload = json!({
                 "name": meta.name,
@@ -93,7 +95,7 @@ fn discovery_entries(sensor: &Sensor, device_id: &str) -> Vec<(String, String)> 
                 "state_topic": sensor.value_topic(meta.subtopic),
                 "unique_id": unique_id,
                 "device": {
-                    "identifiers": [&sanitized],
+                    "identifiers": [&device_key],
                     "name": &sensor.name,
                 }
             });
@@ -181,9 +183,15 @@ mod tests {
         assert_eq!(entries.len(), 3);
 
         let topics: Vec<&str> = entries.iter().map(|(t, _)| t.as_str()).collect();
-        assert!(topics.contains(&"homeassistant/sensor/ebz5dd32r06eta_107_energy_import/config"));
-        assert!(topics.contains(&"homeassistant/sensor/ebz5dd32r06eta_107_energy_export/config"));
-        assert!(topics.contains(&"homeassistant/sensor/ebz5dd32r06eta_107_power_total/config"));
+        assert!(
+            topics.contains(&"homeassistant/sensor/main_ebz5dd32r06eta_107_energy_import/config")
+        );
+        assert!(
+            topics.contains(&"homeassistant/sensor/main_ebz5dd32r06eta_107_energy_export/config")
+        );
+        assert!(
+            topics.contains(&"homeassistant/sensor/main_ebz5dd32r06eta_107_power_total/config")
+        );
     }
 
     #[test]
@@ -200,8 +208,8 @@ mod tests {
         assert_eq!(v["state_class"], "total_increasing");
         assert_eq!(v["unit_of_measurement"], "kWh");
         assert_eq!(v["state_topic"], "stromzaehler2mqtt/main/energy_import");
-        assert_eq!(v["unique_id"], "ebz5dd32r06eta_107_energy_import");
+        assert_eq!(v["unique_id"], "main_ebz5dd32r06eta_107_energy_import");
         assert_eq!(v["device"]["name"], "main");
-        assert_eq!(v["device"]["identifiers"][0], "ebz5dd32r06eta_107");
+        assert_eq!(v["device"]["identifiers"][0], "main_ebz5dd32r06eta_107");
     }
 }

@@ -20,13 +20,15 @@ On first telegram receipt the app publishes a retained discovery config payload 
 to `homeassistant/sensor/{unique_id}/config`. Home Assistant picks these up automatically — no
 manual `configuration.yaml` entries required.
 
-`{unique_id}` is `{device_id}_{reading}`, where `{device_id}` is the meter's device ID from
-the telegram header (lowercased, non-alphanumeric characters replaced with `_`).
+`{unique_id}` is `{sensor_name}_{device_id}_{reading}`, where `{sensor_name}` is the configured
+sensor name and `{device_id}` is the meter's device ID from the telegram header (both lowercased,
+non-alphanumeric characters replaced with `_`). The sensor name prefix ensures each configured
+sensor appears as a separate HA device even if two meters report identical device IDs.
 
 ### Example discovery payload — energy import
 
 ```
-Topic:   homeassistant/sensor/ebz5dd32r06eta_107_energy_import/config
+Topic:   homeassistant/sensor/main_ebz5dd32r06eta_107_energy_import/config
 Retain:  true
 Payload:
 {
@@ -35,9 +37,9 @@ Payload:
   "state_class": "total_increasing",
   "unit_of_measurement": "kWh",
   "state_topic": "stromzaehler/main/energy_import",
-  "unique_id": "ebz5dd32r06eta_107_energy_import",
+  "unique_id": "main_ebz5dd32r06eta_107_energy_import",
   "device": {
-    "identifiers": ["ebz5dd32r06eta_107"],
+    "identifiers": ["main_ebz5dd32r06eta_107"],
     "name": "main"
   }
 }
