@@ -17,8 +17,10 @@ Payloads are plain UTF-8 strings (not JSON). QoS 0, retain false.
 ## Home Assistant MQTT Discovery
 
 On first telegram receipt the app publishes a retained discovery config payload for each reading
-to `homeassistant/sensor/{unique_id}/config`. Home Assistant picks these up automatically — no
-manual `configuration.yaml` entries required.
+to `homeassistant/sensor/{node_id}/{unique_id}/config`. Home Assistant picks these up
+automatically — no manual `configuration.yaml` entries required.
+
+`{node_id}` is the `mqtt.client_id` from `config.yaml`.
 
 `{unique_id}` is `{sensor_name}_{device_id}_{reading}`, where `{sensor_name}` is the configured
 sensor name and `{device_id}` is the meter's device ID from the telegram header (both lowercased,
@@ -28,7 +30,7 @@ sensor appears as a separate HA device even if two meters report identical devic
 ### Example discovery payload — energy import
 
 ```
-Topic:   homeassistant/sensor/main_ebz5dd32r06eta_107_energy_import/config
+Topic:   homeassistant/sensor/stromzaehler2mqtt/main_ebz5dd32r06eta_107_energy_import/config
 Retain:  true
 Payload:
 {

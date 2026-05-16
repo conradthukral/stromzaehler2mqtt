@@ -78,7 +78,7 @@ fn reading_to_state(reading: &Reading) -> Option<(&'static str, String)> {
 }
 
 /// Returns (config_topic, payload_json) pairs for all discovery entries.
-fn discovery_entries(sensor: &Sensor, device_id: &str) -> Vec<(String, String)> {
+fn discovery_entries(sensor: &Sensor, device_id: &str, node_id: &str) -> Vec<(String, String)> {
     let sanitized_name = sanitize_device_id(&sensor.name);
     let sanitized_id = sanitize_device_id(device_id);
     let device_key = format!("{sanitized_name}_{sanitized_id}");
@@ -86,7 +86,7 @@ fn discovery_entries(sensor: &Sensor, device_id: &str) -> Vec<(String, String)> 
         .iter()
         .map(|meta| {
             let unique_id = format!("{device_key}_{}", meta.subtopic);
-            let config_topic = format!("homeassistant/sensor/{unique_id}/config");
+            let config_topic = format!("homeassistant/sensor/{node_id}/{unique_id}/config");
             let payload = json!({
                 "name": meta.name,
                 "device_class": meta.device_class,
@@ -108,8 +108,9 @@ pub async fn publish_discovery(
     mqtt: &AsyncClient,
     sensor: &Sensor,
     device_id: &str,
+    node_id: &str,
 ) -> Result<(), ClientError> {
-    for (topic, payload) in discovery_entries(sensor, device_id) {
+    for (topic, payload) in discovery_entries(sensor, device_id, node_id) {
         mqtt.publish(topic, QoS::AtMostOnce, true, payload).await?;
     }
     Ok(())
@@ -179,25 +180,25 @@ mod tests {
     #[test]
     fn discovery_entries_count_and_topics() {
         let sensor = Sensor::new("main", "stromzaehler2mqtt");
-        let entries = discovery_entries(&sensor, "EBZ5DD32R06ETA_107");
+        let entries = discovery_entries(&sensor, "EBZ5DD32R06ETA_107", "stromzaehler2mqtt");
         assert_eq!(entries.len(), 3);
 
         let topics: Vec<&str> = entries.iter().map(|(t, _)| t.as_str()).collect();
-        assert!(
-            topics.contains(&"homeassistant/sensor/main_ebz5dd32r06eta_107_energy_import/config")
-        );
-        assert!(
-            topics.contains(&"homeassistant/sensor/main_ebz5dd32r06eta_107_energy_export/config")
-        );
-        assert!(
-            topics.contains(&"homeassistant/sensor/main_ebz5dd32r06eta_107_power_total/config")
-        );
+        assert!(topics.contains(
+            &"homeassistant/sensor/stromzaehler2mqtt/main_ebz5dd32r06eta_107_energy_import/config"
+        ));
+        assert!(topics.contains(
+            &"homeassistant/sensor/stromzaehler2mqtt/main_ebz5dd32r06eta_107_energy_export/config"
+        ));
+        assert!(topics.contains(
+            &"homeassistant/sensor/stromzaehler2mqtt/main_ebz5dd32r06eta_107_power_total/config"
+        ));
     }
 
     #[test]
     fn discovery_payload_fields() {
         let sensor = Sensor::new("main", "stromzaehler2mqtt");
-        let entries = discovery_entries(&sensor, "EBZ5DD32R06ETA_107");
+        let entries = discovery_entries(&sensor, "EBZ5DD32R06ETA_107", "stromzaehler2mqtt");
         let (_, payload_json) = entries
             .iter()
             .find(|(t, _)| t.contains("energy_import"))

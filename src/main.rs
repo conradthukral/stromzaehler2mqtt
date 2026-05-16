@@ -137,13 +137,15 @@ async fn main() {
 
     let publish_interval = config.publish_interval;
     let base_topic = config.mqtt.base_topic;
+    let node_id = config.mqtt.client_id;
 
     let mut tasks = JoinSet::new();
     for sensor in config.sensors {
         let client = mqtt_client.clone();
         let base_topic = base_topic.clone();
+        let node_id = node_id.clone();
         tasks.spawn(async move {
-            run_sensor(sensor, client, publish_interval, base_topic).await;
+            run_sensor(sensor, client, publish_interval, base_topic, node_id).await;
         });
     }
 
@@ -159,6 +161,7 @@ async fn run_sensor(
     mqtt_client: AsyncClient,
     publish_interval: Duration,
     base_topic: String,
+    node_id: String,
 ) {
     info!(sensor = %config.name, port = %config.serial_port, baud = config.baud_rate, "Opening serial port");
 
@@ -202,8 +205,13 @@ async fn run_sensor(
                         Ok(t) => {
                             if !discovery_sent {
                                 info!(sensor = %sensor.name, device_id = %t.device_id, "Publishing discovery");
-                                match mqtt::publish_discovery(&mqtt_client, &sensor, &t.device_id)
-                                    .await
+                                match mqtt::publish_discovery(
+                                    &mqtt_client,
+                                    &sensor,
+                                    &t.device_id,
+                                    &node_id,
+                                )
+                                .await
                                 {
                                     Ok(()) => discovery_sent = true,
                                     Err(e) => {
