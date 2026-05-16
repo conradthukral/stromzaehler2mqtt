@@ -127,7 +127,9 @@ async fn main() {
     tokio::spawn(async move {
         loop {
             match eventloop.poll().await {
-                Ok(_) => {}
+                Ok(_) => {
+                    tokio::task::yield_now().await;
+                }
                 Err(e) => {
                     error!("MQTT error: {e}");
                     tokio::time::sleep(Duration::from_secs(5)).await;
