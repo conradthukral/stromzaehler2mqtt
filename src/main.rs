@@ -105,7 +105,7 @@ struct Config {
     publish_interval: Duration,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
