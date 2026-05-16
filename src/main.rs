@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
@@ -25,10 +25,22 @@ struct MqttConfig {
     client_id: String,
 }
 
+fn deserialize_duration_secs<'de, D>(d: D) -> Result<Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u64::deserialize(d).map(Duration::from_secs)
+}
+
 #[derive(Deserialize)]
 struct Config {
     mqtt: MqttConfig,
     sensors: Vec<SensorConfig>,
+    #[serde(
+        rename = "publish_interval_secs",
+        deserialize_with = "deserialize_duration_secs"
+    )]
+    publish_interval: Duration,
 }
 
 #[tokio::main]
@@ -62,11 +74,13 @@ async fn main() {
         }
     });
 
+    let publish_interval = config.publish_interval;
+
     let mut tasks = JoinSet::new();
     for sensor in config.sensors {
         let client = mqtt_client.clone();
         tasks.spawn(async move {
-            run_sensor(sensor, client).await;
+            run_sensor(sensor, client, publish_interval).await;
         });
     }
 
@@ -77,7 +91,7 @@ async fn main() {
     }
 }
 
-async fn run_sensor(config: SensorConfig, mqtt: AsyncClient) {
+async fn run_sensor(config: SensorConfig, mqtt: AsyncClient, publish_interval: Duration) {
     info!(sensor = %config.name, port = %config.serial_port, baud = config.baud_rate, "Opening serial port");
 
     let std_file = match std::fs::OpenOptions::new()
@@ -103,6 +117,7 @@ async fn run_sensor(config: SensorConfig, mqtt: AsyncClient) {
     let mut accum: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 256];
     let mut discovery_sent = false;
+    let mut last_published: Option<Instant> = None;
     loop {
         match port.read(&mut chunk).await {
             Ok(0) => {
@@ -127,7 +142,11 @@ async fn run_sensor(config: SensorConfig, mqtt: AsyncClient) {
                                     }
                                 }
                             }
-                            mqtt::publish_readings(&mqtt, &config.name, &t).await;
+                            let now = Instant::now();
+                            if last_published.is_none_or(|t| now - t >= publish_interval) {
+                                mqtt::publish_readings(&mqtt, &config.name, &t).await;
+                                last_published = Some(now);
+                            }
                         }
                         Err(e) => error!(sensor = %config.name, "Parse error: {e}"),
                     }

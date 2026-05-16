@@ -3,6 +3,8 @@ mqtt:
   port: 1883
   client_id: stromzaehler2mqtt
 
+publish_interval_secs: 60
+
 sensors:
   - name: sensor_1
     serial_port: /dev/ttyUSB0
