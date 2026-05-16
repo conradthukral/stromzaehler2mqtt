@@ -9,6 +9,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Initially supported hardware:** eBZ DD3 2R06 ETA-ODZ1  
 **Data formats:** EN62056-21 (mode D) and EN62056-61 (OBIS-based)
 
+## Documentation
+
+The `docs/` directory contains design and protocol documentation:
+- `docs/telegram-format.md` — EN62056-21 telegram format and OBIS code reference
+- `docs/mqtt.md` — MQTT topic structure, payload format, and Home Assistant discovery design
+
 ## Domain Context
 
 - The optical interface on German smart meters uses infrared (IR) read/write head, typically connected as a serial port (e.g. `/dev/ttyUSB0`)

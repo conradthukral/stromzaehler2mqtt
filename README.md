@@ -10,6 +10,8 @@ Beispieldaten sind im Verzeichnis example_data abgelegt.
 
 Das Telegrammformat ist in [docs/telegram-format.md](docs/telegram-format.md) dokumentiert.
 
+Das MQTT-Publishing und die Home-Assistant-Integration sind in [docs/mqtt.md](docs/mqtt.md) dokumentiert.
+
 ## Testen mit Sensor an remote-Maschine
 * SSH-Tunnel aufbauen: `ssh -L 4000:localhost:4000`
 * Auf remote-Maschine: `socat TCP-LISTEN:4000,reuseaddr,fork /dev/ttyUSB1,b9600,raw`
