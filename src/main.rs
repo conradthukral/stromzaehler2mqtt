@@ -32,6 +32,66 @@ where
     u64::deserialize(d).map(Duration::from_secs)
 }
 
+struct PublishThrottle {
+    interval: Duration,
+    last: Option<Instant>,
+}
+
+impl PublishThrottle {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last: None,
+        }
+    }
+
+    fn ready(&mut self, now: Instant) -> bool {
+        if self.last.is_none_or(|t| now - t >= self.interval) {
+            self.last = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn throttle_first_call_is_ready() {
+        let mut t = PublishThrottle::new(Duration::from_secs(60));
+        assert!(t.ready(Instant::now()));
+    }
+
+    #[test]
+    fn throttle_blocks_within_interval() {
+        let mut t = PublishThrottle::new(Duration::from_secs(60));
+        let now = Instant::now();
+        assert!(t.ready(now));
+        assert!(!t.ready(now + Duration::from_secs(59)));
+    }
+
+    #[test]
+    fn throttle_passes_at_interval_boundary() {
+        let mut t = PublishThrottle::new(Duration::from_secs(60));
+        let now = Instant::now();
+        assert!(t.ready(now));
+        assert!(t.ready(now + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn throttle_resets_after_firing() {
+        let mut t = PublishThrottle::new(Duration::from_secs(60));
+        let now = Instant::now();
+        assert!(t.ready(now));
+        assert!(t.ready(now + Duration::from_secs(60)));
+        assert!(!t.ready(now + Duration::from_secs(119)));
+        assert!(t.ready(now + Duration::from_secs(120)));
+    }
+}
+
 #[derive(Deserialize)]
 struct Config {
     mqtt: MqttConfig,
@@ -117,7 +177,7 @@ async fn run_sensor(config: SensorConfig, mqtt: AsyncClient, publish_interval: D
     let mut accum: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 256];
     let mut discovery_sent = false;
-    let mut last_published: Option<Instant> = None;
+    let mut throttle = PublishThrottle::new(publish_interval);
     loop {
         match port.read(&mut chunk).await {
             Ok(0) => {
@@ -142,10 +202,8 @@ async fn run_sensor(config: SensorConfig, mqtt: AsyncClient, publish_interval: D
                                     }
                                 }
                             }
-                            let now = Instant::now();
-                            if last_published.is_none_or(|t| now - t >= publish_interval) {
+                            if throttle.ready(Instant::now()) {
                                 mqtt::publish_readings(&mqtt, &config.name, &t).await;
-                                last_published = Some(now);
                             }
                         }
                         Err(e) => error!(sensor = %config.name, "Parse error: {e}"),
