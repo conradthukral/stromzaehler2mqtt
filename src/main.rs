@@ -289,6 +289,8 @@ fn configure_tty(fd: std::os::unix::io::RawFd, baud_rate: u32) -> io::Result<()>
         // 7E1: 7 data bits, even parity, 1 stop bit (EN62056-21 mode D)
         tios.c_cflag &= !(libc::CSIZE | libc::PARODD | libc::CSTOPB);
         tios.c_cflag |= libc::CS7 | libc::PARENB | libc::CREAD | libc::CLOCAL;
+        // Batch epoll wakeups: only wake when 32 bytes are buffered instead of 1
+        tios.c_cc[libc::VMIN] = 32;
         libc::cfsetspeed(&mut tios, speed);
         if libc::tcsetattr(fd, libc::TCSANOW, &tios) != 0 {
             return Err(io::Error::last_os_error());
