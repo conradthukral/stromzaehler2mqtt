@@ -1,0 +1,9 @@
+services:
+  stromzaehler2mqtt:
+    build:
+      context: ../..
+    volumes:
+      - ../../config.yaml:/app/config.yaml:ro
+    devices:
+      - /tmp/ttyUSB0:/tmp/ttyUSB0
+    restart: unless-stopped

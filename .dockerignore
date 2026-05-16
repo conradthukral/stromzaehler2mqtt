@@ -1,0 +1,8 @@
+target/
+config.yaml
+local_testing/
+local_config/
+docs/
+example_data/
+.claude/
+.git/
