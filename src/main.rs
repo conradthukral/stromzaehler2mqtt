@@ -8,7 +8,7 @@ use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{error, info};
 
 #[derive(Clone, Debug, Deserialize)]
@@ -31,66 +31,6 @@ where
     D: serde::Deserializer<'de>,
 {
     u64::deserialize(d).map(Duration::from_secs)
-}
-
-struct PublishThrottle {
-    interval: Duration,
-    last: Option<Instant>,
-}
-
-impl PublishThrottle {
-    fn new(interval: Duration) -> Self {
-        Self {
-            interval,
-            last: None,
-        }
-    }
-
-    fn ready(&mut self, now: Instant) -> bool {
-        if self.last.is_none_or(|t| now - t >= self.interval) {
-            self.last = Some(now);
-            true
-        } else {
-            false
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn throttle_first_call_is_ready() {
-        let mut t = PublishThrottle::new(Duration::from_secs(60));
-        assert!(t.ready(Instant::now()));
-    }
-
-    #[test]
-    fn throttle_blocks_within_interval() {
-        let mut t = PublishThrottle::new(Duration::from_secs(60));
-        let now = Instant::now();
-        assert!(t.ready(now));
-        assert!(!t.ready(now + Duration::from_secs(59)));
-    }
-
-    #[test]
-    fn throttle_passes_at_interval_boundary() {
-        let mut t = PublishThrottle::new(Duration::from_secs(60));
-        let now = Instant::now();
-        assert!(t.ready(now));
-        assert!(t.ready(now + Duration::from_secs(60)));
-    }
-
-    #[test]
-    fn throttle_resets_after_firing() {
-        let mut t = PublishThrottle::new(Duration::from_secs(60));
-        let now = Instant::now();
-        assert!(t.ready(now));
-        assert!(t.ready(now + Duration::from_secs(60)));
-        assert!(!t.ready(now + Duration::from_secs(119)));
-        assert!(t.ready(now + Duration::from_secs(120)));
-    }
 }
 
 #[derive(Deserialize)]
@@ -193,54 +133,64 @@ fn run_sensor(
     let sensor = mqtt::Sensor::new(&config.name, base_topic);
     info!(sensor = %sensor.name, "Serial port open, reading data");
 
+    let fd = file.as_raw_fd();
     let mut accum: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 256];
     let mut discovery_sent = false;
-    let mut throttle = PublishThrottle::new(publish_interval);
 
     loop {
-        match file.read(&mut chunk) {
-            Ok(0) => {
-                info!(sensor = %sensor.name, "Serial port closed");
-                break;
-            }
-            Ok(n) => {
-                accum.extend_from_slice(&chunk[..n]);
-                let (telegrams, remaining) = parser::split_telegrams(&accum);
-                let drain_len = accum.len() - remaining.len();
-                for raw in telegrams {
-                    match parser::parse_telegram(raw) {
-                        Ok(t) => {
-                            if !discovery_sent {
-                                info!(sensor = %sensor.name, device_id = %t.device_id, "Publishing discovery");
-                                for msg in
-                                    mqtt::discovery_publishes(&sensor, &t.device_id, &node_id)
-                                {
-                                    if tx.send(msg).is_err() {
-                                        return;
-                                    }
-                                }
-                                discovery_sent = true;
-                            }
-                            if throttle.ready(Instant::now()) {
-                                log_telegram(&sensor.name, &t);
-                                for msg in mqtt::reading_publishes(&sensor, &t) {
-                                    if tx.send(msg).is_err() {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => error!(sensor = %sensor.name, "Parse error: {e}"),
+        // Discard everything buffered during sleep (or any partial data on the
+        // first iteration before we've read a full telegram).
+        unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
+        accum.clear();
+
+        // Read until split_telegrams finds at least one complete '/'…'!' telegram.
+        'read: loop {
+            match file.read(&mut chunk) {
+                Ok(0) => {
+                    info!(sensor = %sensor.name, "Serial port closed");
+                    return;
+                }
+                Ok(n) => {
+                    accum.extend_from_slice(&chunk[..n]);
+                    if !parser::split_telegrams(&accum).0.is_empty() {
+                        break 'read;
                     }
                 }
-                accum.drain(..drain_len);
-            }
-            Err(e) => {
-                error!(sensor = %sensor.name, "Read error: {e}");
-                break;
+                Err(e) => {
+                    error!(sensor = %sensor.name, "Read error: {e}");
+                    return;
+                }
             }
         }
+
+        let (telegrams, _) = parser::split_telegrams(&accum);
+        let telegram = match parser::parse_telegram(telegrams.last().unwrap()) {
+            Ok(t) => t,
+            Err(e) => {
+                error!(sensor = %sensor.name, "Parse error: {e}");
+                continue;
+            }
+        };
+
+        if !discovery_sent {
+            info!(sensor = %sensor.name, device_id = %telegram.device_id, "Publishing discovery");
+            for msg in mqtt::discovery_publishes(&sensor, &telegram.device_id, &node_id) {
+                if tx.send(msg).is_err() {
+                    return;
+                }
+            }
+            discovery_sent = true;
+        }
+
+        log_telegram(&sensor.name, &telegram);
+        for msg in mqtt::reading_publishes(&sensor, &telegram) {
+            if tx.send(msg).is_err() {
+                return;
+            }
+        }
+
+        std::thread::sleep(publish_interval);
     }
 }
 
@@ -277,8 +227,6 @@ fn configure_tty(fd: std::os::unix::io::RawFd, baud_rate: u32) -> io::Result<()>
         // 7E1: 7 data bits, even parity, 1 stop bit (EN62056-21 mode D)
         tios.c_cflag &= !(libc::CSIZE | libc::PARODD | libc::CSTOPB);
         tios.c_cflag |= libc::CS7 | libc::PARENB | libc::CREAD | libc::CLOCAL;
-        // Block until 32 bytes are buffered to reduce wakeups
-        tios.c_cc[libc::VMIN] = 32;
         libc::cfsetspeed(&mut tios, speed);
         if libc::tcsetattr(fd, libc::TCSANOW, &tios) != 0 {
             return Err(io::Error::last_os_error());
