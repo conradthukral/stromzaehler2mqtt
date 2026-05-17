@@ -144,16 +144,17 @@ fn run_sensor(
         unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
         accum.clear();
 
-        'read: loop {
+        // Skip bytes until the start of a telegram.
+        'start: loop {
             match file.read(&mut chunk) {
                 Ok(0) => {
                     info!(sensor = %sensor.name, "Serial port closed");
                     return;
                 }
                 Ok(n) => {
-                    accum.extend_from_slice(&chunk[..n]);
-                    if parser::last_complete_telegram(&accum).is_some() {
-                        break 'read;
+                    if let Some(i) = chunk[..n].iter().position(|&b| b == b'/') {
+                        accum.extend_from_slice(&chunk[i..n]);
+                        break 'start;
                     }
                 }
                 Err(e) => {
@@ -163,8 +164,22 @@ fn run_sensor(
             }
         }
 
-        let telegram = match parser::parse_telegram(parser::last_complete_telegram(&accum).unwrap())
-        {
+        // Read until the end marker '!' is in the buffer.
+        while !accum.contains(&b'!') {
+            match file.read(&mut chunk) {
+                Ok(0) => {
+                    info!(sensor = %sensor.name, "Serial port closed");
+                    return;
+                }
+                Ok(n) => accum.extend_from_slice(&chunk[..n]),
+                Err(e) => {
+                    error!(sensor = %sensor.name, "Read error: {e}");
+                    return;
+                }
+            }
+        }
+
+        let telegram = match parser::parse_telegram(&accum) {
             Ok(t) => t,
             Err(e) => {
                 error!(sensor = %sensor.name, "Parse error: {e}");

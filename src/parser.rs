@@ -78,16 +78,6 @@ impl std::fmt::Display for ParseError {
     }
 }
 
-pub fn last_complete_telegram(buf: &[u8]) -> Option<&[u8]> {
-    let end_bang = buf.iter().rposition(|&b| b == b'!')?;
-    let start = buf[..end_bang].iter().rposition(|&b| b == b'/')?;
-    let mut end = end_bang + 1;
-    while end < buf.len() && (buf[end] == b'\r' || buf[end] == b'\n') {
-        end += 1;
-    }
-    Some(&buf[start..end])
-}
-
 pub fn parse_telegram(data: &[u8]) -> Result<Telegram, ParseError> {
     let text = std::str::from_utf8(data).map_err(|_| ParseError::InvalidUtf8)?;
     let mut lines = text.lines();
@@ -201,30 +191,6 @@ mod tests {
     fn parse_operating_time() {
         let t = parse_telegram(SAMPLE).unwrap();
         assert!(t.readings.contains(&Reading::OperatingTime(0x02FAB8BF)));
-    }
-
-    #[test]
-    fn last_telegram_single() {
-        assert_eq!(last_complete_telegram(SAMPLE), Some(SAMPLE));
-    }
-
-    #[test]
-    fn last_telegram_two_returns_last() {
-        let two: Vec<u8> = [SAMPLE, SAMPLE].concat();
-        assert_eq!(last_complete_telegram(&two), Some(SAMPLE));
-    }
-
-    #[test]
-    fn last_telegram_ignores_partial_tail() {
-        let partial = b"/EBZ5DD32R06ETA_107\r\n\r\n1-0:1.8.0*255(002714*kWh)\r\n";
-        let full: Vec<u8> = [SAMPLE, partial.as_ref()].concat();
-        assert_eq!(last_complete_telegram(&full), Some(SAMPLE));
-    }
-
-    #[test]
-    fn last_telegram_none_when_incomplete() {
-        let partial = b"/EBZ5DD32R06ETA_107\r\n\r\n1-0:1.8.0*255(002714*kWh)\r\n";
-        assert_eq!(last_complete_telegram(partial), None);
     }
 
     #[test]
