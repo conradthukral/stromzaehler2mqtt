@@ -18,18 +18,7 @@ impl MqttClient {
     }
 
     fn send_connect(&mut self, client_id: &str) -> std::io::Result<()> {
-        let id = client_id.as_bytes();
-        // Variable header: 6 (protocol name+len) + 1 (level) + 1 (flags) + 2 (keepalive) = 10
-        // Payload: 2 (id length prefix) + id bytes
-        let remaining = 10 + 2 + id.len();
-        let mut pkt = Vec::with_capacity(2 + remaining);
-        pkt.push(0x10); // CONNECT
-        encode_remaining_len(&mut pkt, remaining);
-        // Protocol name "MQTT", level 4 (3.1.1), flags 0x02 (clean session), keep-alive 0
-        pkt.extend_from_slice(&[0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04, 0x02, 0x00, 0x00]);
-        pkt.push((id.len() >> 8) as u8);
-        pkt.push(id.len() as u8);
-        pkt.extend_from_slice(id);
+        let pkt = connect_packet(client_id);
         self.stream.write_all(&pkt)
     }
 
@@ -52,18 +41,39 @@ impl MqttClient {
     }
 
     pub fn publish(&mut self, topic: &str, payload: &[u8], retain: bool) -> std::io::Result<()> {
-        let topic_bytes = topic.as_bytes();
-        let remaining = 2 + topic_bytes.len() + payload.len();
-        let first = if retain { 0x31u8 } else { 0x30u8 };
-        let mut pkt = Vec::with_capacity(2 + remaining);
-        pkt.push(first);
-        encode_remaining_len(&mut pkt, remaining);
-        pkt.push((topic_bytes.len() >> 8) as u8);
-        pkt.push(topic_bytes.len() as u8);
-        pkt.extend_from_slice(topic_bytes);
-        pkt.extend_from_slice(payload);
+        let pkt = publish_packet(topic, payload, retain);
         self.stream.write_all(&pkt)
     }
+}
+
+fn connect_packet(client_id: &str) -> Vec<u8> {
+    let id = client_id.as_bytes();
+    // Variable header: 6 (protocol name+len) + 1 (level) + 1 (flags) + 2 (keepalive) = 10
+    // Payload: 2 (id length prefix) + id bytes
+    let remaining = 10 + 2 + id.len();
+    let mut pkt = Vec::with_capacity(2 + remaining);
+    pkt.push(0x10); // CONNECT
+    encode_remaining_len(&mut pkt, remaining);
+    // Protocol name "MQTT", level 4 (3.1.1), flags 0x02 (clean session), keep-alive 0
+    pkt.extend_from_slice(&[0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04, 0x02, 0x00, 0x00]);
+    pkt.push((id.len() >> 8) as u8);
+    pkt.push(id.len() as u8);
+    pkt.extend_from_slice(id);
+    pkt
+}
+
+fn publish_packet(topic: &str, payload: &[u8], retain: bool) -> Vec<u8> {
+    let topic_bytes = topic.as_bytes();
+    let remaining = 2 + topic_bytes.len() + payload.len();
+    let first = if retain { 0x31u8 } else { 0x30u8 };
+    let mut pkt = Vec::with_capacity(2 + remaining);
+    pkt.push(first);
+    encode_remaining_len(&mut pkt, remaining);
+    pkt.push((topic_bytes.len() >> 8) as u8);
+    pkt.push(topic_bytes.len() as u8);
+    pkt.extend_from_slice(topic_bytes);
+    pkt.extend_from_slice(payload);
+    pkt
 }
 
 fn encode_remaining_len(buf: &mut Vec<u8>, mut len: usize) {
@@ -108,52 +118,34 @@ mod tests {
 
     #[test]
     fn connect_packet_structure() {
-        // Build a CONNECT packet and verify key bytes.
-        // We can't call MqttClient::connect without a real broker, but we can
-        // verify the packet builder in isolation by inspecting send_connect output.
-        let client_id = "test";
-        let id = client_id.as_bytes();
-        let remaining = 10 + 2 + id.len();
-        let mut pkt = Vec::new();
-        pkt.push(0x10);
-        encode_remaining_len(&mut pkt, remaining);
-        pkt.extend_from_slice(&[0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04, 0x02, 0x00, 0x00]);
-        pkt.push((id.len() >> 8) as u8);
-        pkt.push(id.len() as u8);
-        pkt.extend_from_slice(id);
+        let pkt = connect_packet("test");
 
         assert_eq!(pkt[0], 0x10); // CONNECT fixed header
         assert_eq!(&pkt[2..8], &[0x00, 0x04, b'M', b'Q', b'T', b'T']); // protocol name
         assert_eq!(pkt[8], 0x04); // protocol level 3.1.1
         assert_eq!(pkt[9], 0x02); // clean session
         assert_eq!(&pkt[10..12], &[0x00, 0x00]); // keep-alive 0
+        assert_eq!(&pkt[12..], &[0x00, 0x04, b't', b'e', b's', b't']);
     }
 
     #[test]
     fn publish_packet_no_retain() {
         let topic = "foo/bar";
         let payload = b"hello";
-        let topic_bytes = topic.as_bytes();
-        let remaining = 2 + topic_bytes.len() + payload.len();
-        let mut pkt = vec![0x30u8];
-        encode_remaining_len(&mut pkt, remaining);
-        pkt.push((topic_bytes.len() >> 8) as u8);
-        pkt.push(topic_bytes.len() as u8);
-        pkt.extend_from_slice(topic_bytes);
-        pkt.extend_from_slice(payload);
+        let pkt = publish_packet(topic, payload, false);
 
         assert_eq!(pkt[0], 0x30); // PUBLISH, QoS 0, no retain
         let topic_len = ((pkt[2] as usize) << 8) | pkt[3] as usize;
         assert_eq!(topic_len, topic.len());
-        assert_eq!(&pkt[4..4 + topic_len], topic_bytes);
+        assert_eq!(&pkt[4..4 + topic_len], topic.as_bytes());
         assert_eq!(&pkt[4 + topic_len..], payload);
     }
 
     #[test]
     fn publish_packet_retain() {
-        let mut pkt = vec![0x31u8]; // retain bit set
-        encode_remaining_len(&mut pkt, 2 + 3 + 1);
-        pkt.extend_from_slice(&[0x00, 0x03, b'a', b'/', b'b', b'1']);
-        assert_eq!(pkt[0], 0x31);
+        assert_eq!(
+            publish_packet("a/b", b"1", true),
+            &[0x31, 0x06, 0x00, 0x03, b'a', b'/', b'b', b'1']
+        );
     }
 }
