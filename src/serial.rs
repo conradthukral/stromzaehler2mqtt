@@ -45,6 +45,12 @@ fn read_framed_telegram<R: Read>(reader: &mut R) -> io::Result<Vec<u8>> {
         }
         let b = byte[0];
         let was_line_start = at_line_start;
+        if b == b'/' {
+            buf.clear();
+            buf.push(b);
+            at_line_start = false;
+            continue;
+        }
         buf.push(b);
         if b == b'!' && was_line_start {
             break;
@@ -137,6 +143,25 @@ mod tests {
         assert_eq!(
             second,
             b"/second\r\n\
+              1-0:1.8.0*255(000002.00000000*kWh)\r\n\
+              !"
+        );
+    }
+
+    #[test]
+    fn framed_read_resyncs_on_header_inside_partial_telegram() {
+        let mut input = io::Cursor::new(
+            b"/stale\r\n\
+              1-0:36.7.0*255(00/EBZ5DD32R06ETA_107\r\n\
+              1-0:1.8.0*255(000002.00000000*kWh)\r\n\
+              !\r\n",
+        );
+
+        let telegram = read_framed_telegram(&mut input).unwrap();
+
+        assert_eq!(
+            telegram,
+            b"/EBZ5DD32R06ETA_107\r\n\
               1-0:1.8.0*255(000002.00000000*kWh)\r\n\
               !"
         );
