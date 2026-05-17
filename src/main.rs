@@ -178,6 +178,10 @@ fn run_sensor(
             }
         }
 
+        // Sleep keeps the process fully dormant between publishes (~0% CPU).
+        // Continuous blocking reads cost ~1-2% CPU due to scheduler churn even
+        // with VMIN tuning. tcflush at the start of the next read discards any
+        // bytes that arrived during the sleep.
         std::thread::sleep(publish_interval);
     }
 }

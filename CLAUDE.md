@@ -21,3 +21,30 @@ The `docs/` directory contains design and protocol documentation:
 - EN62056-21 defines the data exchange protocol; EN62056-61 defines the OBIS code structure for identifying measurement values
 - OBIS codes identify meter readings (e.g. `1-0:1.8.0` = total active energy import in Wh)
 - Home Assistant auto-discovery works by publishing device config to `homeassistant/<component>/<device_id>/config` before publishing state values
+
+## Code Structure
+
+| Module | Responsibility |
+|---|---|
+| `serial.rs` | Serial port open/configure (`7E1`, raw mode) and raw telegram read |
+| `parser.rs` | Parses raw bytes into `Telegram` / `Reading` types; owns OBIS code mapping |
+| `mqtt.rs` | Builds HA discovery payloads and maps `Reading` variants to MQTT publish messages |
+| `mqtt_client.rs` | Minimal MQTT 3.1.1 over TCP — no external MQTT library |
+| `main.rs` | Config loading, spawns one thread per sensor, runs MQTT publish loop |
+
+## Architecture
+
+Data flow: `serial::read_telegram` → `parser::parse_telegram` → `mqtt::reading_publishes` → `mpsc` channel → `mqtt_client::publish`
+
+Threading: one sensor thread per entry in `config.yaml`, all feeding a single MQTT thread via an `mpsc::channel<mqtt::Publish>`. The MQTT thread owns the TCP connection and reconnects on error.
+
+## Development
+
+```
+cargo build
+cargo test
+```
+
+## Key Constraints
+
+**Why no canonical mode:** `VEOL='!'` does not work as a telegram terminator because the kernel TTY line discipline treats `\n` as an unconditional line boundary that cannot be disabled, causing one `read()` return per telegram line instead of waiting for `!`.
