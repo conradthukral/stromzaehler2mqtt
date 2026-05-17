@@ -134,52 +134,22 @@ fn run_sensor(
     info!(sensor = %sensor.name, "Serial port open, reading data");
 
     let fd = file.as_raw_fd();
-    let mut accum: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 256];
     let mut discovery_sent = false;
 
     loop {
-        // Discard everything buffered during sleep (or any partial data on the
-        // first iteration before we've read a full telegram).
-        unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
-        accum.clear();
-
-        // Skip bytes until the start of a telegram.
-        'start: loop {
-            match file.read(&mut chunk) {
-                Ok(0) => {
-                    info!(sensor = %sensor.name, "Serial port closed");
-                    return;
-                }
-                Ok(n) => {
-                    if let Some(i) = chunk[..n].iter().position(|&b| b == b'/') {
-                        accum.extend_from_slice(&chunk[i..n]);
-                        break 'start;
-                    }
-                }
-                Err(e) => {
-                    error!(sensor = %sensor.name, "Read error: {e}");
-                    return;
-                }
+        let raw = match read_telegram(&mut file, fd) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                info!(sensor = %sensor.name, "Serial port closed");
+                return;
             }
-        }
-
-        // Read until the end marker '!' is in the buffer.
-        while !accum.contains(&b'!') {
-            match file.read(&mut chunk) {
-                Ok(0) => {
-                    info!(sensor = %sensor.name, "Serial port closed");
-                    return;
-                }
-                Ok(n) => accum.extend_from_slice(&chunk[..n]),
-                Err(e) => {
-                    error!(sensor = %sensor.name, "Read error: {e}");
-                    return;
-                }
+            Err(e) => {
+                error!(sensor = %sensor.name, "Read error: {e}");
+                return;
             }
-        }
+        };
 
-        let telegram = match parser::parse_telegram(&accum) {
+        let telegram = match parser::parse_telegram(&raw) {
             Ok(t) => t,
             Err(e) => {
                 error!(sensor = %sensor.name, "Parse error: {e}");
@@ -213,6 +183,33 @@ fn log_telegram(label: &str, t: &parser::Telegram) {
     for r in &t.readings {
         info!("[{label}]   {r}");
     }
+}
+
+fn read_telegram(file: &mut std::fs::File, fd: std::os::unix::io::RawFd) -> io::Result<Vec<u8>> {
+    unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 256];
+
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        if let Some(i) = chunk[..n].iter().position(|&b| b == b'/') {
+            buf.extend_from_slice(&chunk[i..n]);
+            break;
+        }
+    }
+
+    while !buf.contains(&b'!') {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+
+    Ok(buf)
 }
 
 fn configure_tty(fd: std::os::unix::io::RawFd, baud_rate: u32) -> io::Result<()> {
