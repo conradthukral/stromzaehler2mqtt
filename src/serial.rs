@@ -1,5 +1,4 @@
-use std::io;
-use std::io::Read;
+use std::io::{self, BufRead};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
 
@@ -20,26 +19,30 @@ pub fn open_serial_port(path: &str, baud_rate: u32) -> io::Result<SerialPort> {
 
 pub fn read_telegram(port: &mut SerialPort) -> io::Result<Vec<u8>> {
     unsafe { libc::tcflush(port.fd, libc::TCIFLUSH) };
+    let mut reader = io::BufReader::new(&mut port.file);
     let mut buf = Vec::new();
-    let mut chunk = [0u8; 256];
+    let mut line = String::new();
 
     loop {
-        let n = port.file.read(&mut chunk)?;
-        if n == 0 {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
-        if let Some(i) = chunk[..n].iter().position(|&b| b == b'/') {
-            buf.extend_from_slice(&chunk[i..n]);
+        if line.starts_with('/') {
+            buf.extend_from_slice(line.as_bytes());
             break;
         }
     }
 
-    while !buf.contains(&b'!') {
-        let n = port.file.read(&mut chunk)?;
-        if n == 0 {
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
-        buf.extend_from_slice(&chunk[..n]);
+        buf.extend_from_slice(line.as_bytes());
+        if line.starts_with('!') {
+            break;
+        }
     }
 
     Ok(buf)
@@ -68,6 +71,12 @@ fn configure_tty(fd: RawFd, baud_rate: u32) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
         libc::cfmakeraw(&mut tios);
+        // Re-enable canonical mode so the kernel buffers by \n, letting us
+        // read one line at a time without manual chunk scanning. ICRNL stays
+        // off (cleared by cfmakeraw) so \r\n arrives as-is; parser trims lines.
+        // VEOL='!' alone can't serve as the sole terminator because \n is an
+        // unconditional boundary — we detect '!' at the application level instead.
+        tios.c_lflag |= libc::ICANON;
         // 7E1: 7 data bits, even parity, 1 stop bit (EN62056-21 mode D)
         tios.c_cflag &= !(libc::CSIZE | libc::PARODD | libc::CSTOPB);
         tios.c_cflag |= libc::CS7 | libc::PARENB | libc::CREAD | libc::CLOCAL;

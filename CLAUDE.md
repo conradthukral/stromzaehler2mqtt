@@ -44,7 +44,3 @@ Threading: one sensor thread per entry in `config.yaml`, all feeding a single MQ
 cargo build
 cargo test
 ```
-
-## Key Constraints
-
-**Why no canonical mode:** `VEOL='!'` does not work as a telegram terminator because the kernel TTY line discipline treats `\n` as an unconditional line boundary that cannot be disabled, causing one `read()` return per telegram line instead of waiting for `!`.
