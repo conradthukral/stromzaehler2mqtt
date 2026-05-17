@@ -6,16 +6,26 @@ pub struct Sensor {
     pub name: String,
     sanitized_name: String,
     pub base_topic: String,
+    pub device_id: String,
+    sanitized_device_id: String,
 }
 
 impl Sensor {
-    pub fn new(name: impl Into<String>, base_topic: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        base_topic: impl Into<String>,
+        device_id: impl Into<String>,
+    ) -> Self {
         let name = name.into();
         let sanitized_name = sanitize_device_id(&name);
+        let device_id = device_id.into();
+        let sanitized_device_id = sanitize_device_id(&device_id);
         Self {
             name,
             sanitized_name,
             base_topic: base_topic.into(),
+            device_id,
+            sanitized_device_id,
         }
     }
 
@@ -84,9 +94,8 @@ fn reading_to_state(reading: &Reading) -> Option<(&'static str, String)> {
 }
 
 /// Returns (config_topic, payload_json) pairs for all discovery entries.
-fn discovery_entries(sensor: &Sensor, device_id: &str, node_id: &str) -> Vec<(String, String)> {
-    let sanitized_id = sanitize_device_id(device_id);
-    let device_key = format!("{}_{sanitized_id}", sensor.sanitized_name);
+fn discovery_entries(sensor: &Sensor, node_id: &str) -> Vec<(String, String)> {
+    let device_key = format!("{}_{}", sensor.sanitized_name, sensor.sanitized_device_id);
     READINGS
         .iter()
         .map(|meta| {
@@ -109,8 +118,8 @@ fn discovery_entries(sensor: &Sensor, device_id: &str, node_id: &str) -> Vec<(St
         .collect()
 }
 
-pub fn discovery_publishes(sensor: &Sensor, device_id: &str, node_id: &str) -> Vec<Publish> {
-    discovery_entries(sensor, device_id, node_id)
+pub fn discovery_publishes(sensor: &Sensor, node_id: &str) -> Vec<Publish> {
+    discovery_entries(sensor, node_id)
         .into_iter()
         .map(|(topic, payload)| Publish {
             topic,
@@ -190,8 +199,8 @@ mod tests {
 
     #[test]
     fn discovery_entries_count_and_topics() {
-        let sensor = Sensor::new("main", "stromzaehler2mqtt");
-        let entries = discovery_entries(&sensor, "EBZ5DD32R06ETA_107", "stromzaehler2mqtt");
+        let sensor = Sensor::new("main", "stromzaehler2mqtt", "EBZ5DD32R06ETA_107");
+        let entries = discovery_entries(&sensor, "stromzaehler2mqtt");
         assert_eq!(entries.len(), 3);
 
         let topics: Vec<&str> = entries.iter().map(|(t, _)| t.as_str()).collect();
@@ -208,8 +217,8 @@ mod tests {
 
     #[test]
     fn discovery_payload_fields() {
-        let sensor = Sensor::new("main", "stromzaehler2mqtt");
-        let entries = discovery_entries(&sensor, "EBZ5DD32R06ETA_107", "stromzaehler2mqtt");
+        let sensor = Sensor::new("main", "stromzaehler2mqtt", "EBZ5DD32R06ETA_107");
+        let entries = discovery_entries(&sensor, "stromzaehler2mqtt");
         let (_, payload_json) = entries
             .iter()
             .find(|(t, _)| t.contains("energy_import"))
