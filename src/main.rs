@@ -134,7 +134,34 @@ fn run_sensor(
     info!(sensor = %sensor.name, "Serial port open, reading data");
 
     let fd = file.as_raw_fd();
-    let mut discovery_sent = false;
+
+    let discovery_telegram = match read_telegram(&mut file, fd) {
+        Ok(b) => match parser::parse_telegram(&b) {
+            Ok(t) => t,
+            Err(e) => {
+                error!(sensor = %sensor.name, "Parse error: {e}");
+                return;
+            }
+        },
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+            info!(sensor = %sensor.name, "Serial port closed");
+            return;
+        }
+        Err(e) => {
+            error!(sensor = %sensor.name, "Read error: {e}");
+            return;
+        }
+    };
+
+    let device_id = discovery_telegram
+        .meter_id()
+        .unwrap_or(&discovery_telegram.device_id);
+    info!(sensor = %sensor.name, device_id = %device_id, "Publishing discovery");
+    for msg in mqtt::discovery_publishes(&sensor, device_id, &node_id) {
+        if tx.send(msg).is_err() {
+            return;
+        }
+    }
 
     loop {
         let raw = match read_telegram(&mut file, fd) {
@@ -156,17 +183,6 @@ fn run_sensor(
                 continue;
             }
         };
-
-        if !discovery_sent {
-            let device_id = telegram.meter_id().unwrap_or(&telegram.device_id);
-            info!(sensor = %sensor.name, device_id = %device_id, "Publishing discovery");
-            for msg in mqtt::discovery_publishes(&sensor, device_id, &node_id) {
-                if tx.send(msg).is_err() {
-                    return;
-                }
-            }
-            discovery_sent = true;
-        }
 
         log_telegram(&sensor.name, &telegram);
         for msg in mqtt::reading_publishes(&sensor, &telegram) {
