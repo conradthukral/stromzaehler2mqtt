@@ -28,8 +28,8 @@ pub fn read_telegram(port: &mut SerialPort) -> io::Result<Vec<u8>> {
         if reader.read_line(&mut line)? == 0 {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
-        if line.starts_with('/') {
-            buf.extend_from_slice(line.as_bytes());
+        if let Some(i) = line.find('/') {
+            buf.extend_from_slice(line[i..].as_bytes());
             break;
         }
     }
