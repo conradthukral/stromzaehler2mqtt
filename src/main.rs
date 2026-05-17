@@ -1,12 +1,10 @@
 mod mqtt;
 mod mqtt_client;
 mod parser;
+mod serial;
 
 use serde::Deserialize;
 use std::io;
-use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::io::AsRawFd;
 use std::sync::mpsc;
 use std::time::Duration;
 use tracing::{error, info};
@@ -113,28 +111,17 @@ fn run_sensor(
 ) {
     info!(sensor = %config.name, port = %config.serial_port, baud = config.baud_rate, "Opening serial port");
 
-    let mut file = match std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOCTTY)
-        .open(&config.serial_port)
-    {
-        Ok(f) => f,
+    let mut port = match serial::open_serial_port(&config.serial_port, config.baud_rate) {
+        Ok(p) => p,
         Err(e) => {
             error!(sensor = %config.name, "Failed to open serial port: {e}");
             return;
         }
     };
 
-    if let Err(e) = configure_tty(file.as_raw_fd(), config.baud_rate) {
-        error!(sensor = %config.name, "Failed to configure serial port: {e}");
-        return;
-    }
-
     info!(sensor = %config.name, "Serial port open, reading data");
 
-    let fd = file.as_raw_fd();
-
-    let discovery_telegram = match read_telegram(&mut file, fd) {
+    let discovery_telegram = match serial::read_telegram(&mut port) {
         Ok(b) => match parser::parse_telegram(&b) {
             Ok(t) => t,
             Err(e) => {
@@ -164,7 +151,7 @@ fn run_sensor(
     }
 
     loop {
-        let raw = match read_telegram(&mut file, fd) {
+        let raw = match serial::read_telegram(&mut port) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                 info!(sensor = %sensor.name, "Serial port closed");
@@ -200,65 +187,4 @@ fn log_telegram(label: &str, t: &parser::Telegram) {
     for r in &t.readings {
         info!("[{label}]   {r}");
     }
-}
-
-fn read_telegram(file: &mut std::fs::File, fd: std::os::unix::io::RawFd) -> io::Result<Vec<u8>> {
-    unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 256];
-
-    loop {
-        let n = file.read(&mut chunk)?;
-        if n == 0 {
-            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-        }
-        if let Some(i) = chunk[..n].iter().position(|&b| b == b'/') {
-            buf.extend_from_slice(&chunk[i..n]);
-            break;
-        }
-    }
-
-    while !buf.contains(&b'!') {
-        let n = file.read(&mut chunk)?;
-        if n == 0 {
-            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    }
-
-    Ok(buf)
-}
-
-fn configure_tty(fd: std::os::unix::io::RawFd, baud_rate: u32) -> io::Result<()> {
-    let speed = match baud_rate {
-        300 => libc::B300,
-        600 => libc::B600,
-        1200 => libc::B1200,
-        2400 => libc::B2400,
-        4800 => libc::B4800,
-        9600 => libc::B9600,
-        19200 => libc::B19200,
-        38400 => libc::B38400,
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("unsupported baud rate: {baud_rate}"),
-            ));
-        }
-    };
-    unsafe {
-        let mut tios: libc::termios = std::mem::zeroed();
-        if libc::tcgetattr(fd, &mut tios) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        libc::cfmakeraw(&mut tios);
-        // 7E1: 7 data bits, even parity, 1 stop bit (EN62056-21 mode D)
-        tios.c_cflag &= !(libc::CSIZE | libc::PARODD | libc::CSTOPB);
-        tios.c_cflag |= libc::CS7 | libc::PARENB | libc::CREAD | libc::CLOCAL;
-        libc::cfsetspeed(&mut tios, speed);
-        if libc::tcsetattr(fd, libc::TCSANOW, &tios) != 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
 }
