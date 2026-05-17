@@ -144,7 +144,6 @@ fn run_sensor(
         unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
         accum.clear();
 
-        // Read until split_telegrams finds at least one complete '/'…'!' telegram.
         'read: loop {
             match file.read(&mut chunk) {
                 Ok(0) => {
@@ -153,7 +152,7 @@ fn run_sensor(
                 }
                 Ok(n) => {
                     accum.extend_from_slice(&chunk[..n]);
-                    if !parser::split_telegrams(&accum).0.is_empty() {
+                    if parser::last_complete_telegram(&accum).is_some() {
                         break 'read;
                     }
                 }
@@ -164,8 +163,8 @@ fn run_sensor(
             }
         }
 
-        let (telegrams, _) = parser::split_telegrams(&accum);
-        let telegram = match parser::parse_telegram(telegrams.last().unwrap()) {
+        let telegram = match parser::parse_telegram(parser::last_complete_telegram(&accum).unwrap())
+        {
             Ok(t) => t,
             Err(e) => {
                 error!(sensor = %sensor.name, "Parse error: {e}");

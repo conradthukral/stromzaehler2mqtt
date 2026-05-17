@@ -78,37 +78,14 @@ impl std::fmt::Display for ParseError {
     }
 }
 
-/// Extract complete telegrams from a streaming byte buffer.
-///
-/// Returns slices of each complete telegram found and the unconsumed tail
-/// (an incomplete telegram in progress). Callers should drain the consumed
-/// prefix and retain the tail for the next read.
-pub fn split_telegrams(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
-    let mut telegrams = Vec::new();
-    let mut pos = 0;
-
-    while pos < buf.len() {
-        let start = match buf[pos..].iter().position(|&b| b == b'/') {
-            Some(i) => pos + i,
-            None => return (telegrams, &buf[pos..]),
-        };
-
-        let end_bang = match buf[start..].iter().position(|&b| b == b'!') {
-            Some(i) => start + i,
-            None => return (telegrams, &buf[start..]),
-        };
-
-        // Consume '!' plus any trailing \r\n (and optional CRC before \n)
-        let mut end = end_bang + 1;
-        while end < buf.len() && (buf[end] == b'\r' || buf[end] == b'\n') {
-            end += 1;
-        }
-
-        telegrams.push(&buf[start..end]);
-        pos = end;
+pub fn last_complete_telegram(buf: &[u8]) -> Option<&[u8]> {
+    let end_bang = buf.iter().rposition(|&b| b == b'!')?;
+    let start = buf[..end_bang].iter().rposition(|&b| b == b'/')?;
+    let mut end = end_bang + 1;
+    while end < buf.len() && (buf[end] == b'\r' || buf[end] == b'\n') {
+        end += 1;
     }
-
-    (telegrams, &buf[pos..])
+    Some(&buf[start..end])
 }
 
 pub fn parse_telegram(data: &[u8]) -> Result<Telegram, ParseError> {
@@ -227,28 +204,27 @@ mod tests {
     }
 
     #[test]
-    fn split_single_telegram() {
-        let (telegrams, remaining) = split_telegrams(SAMPLE);
-        assert_eq!(telegrams.len(), 1);
-        assert!(remaining.is_empty());
+    fn last_telegram_single() {
+        assert_eq!(last_complete_telegram(SAMPLE), Some(SAMPLE));
     }
 
     #[test]
-    fn split_two_telegrams() {
+    fn last_telegram_two_returns_last() {
         let two: Vec<u8> = [SAMPLE, SAMPLE].concat();
-        let (telegrams, remaining) = split_telegrams(&two);
-        assert_eq!(telegrams.len(), 2);
-        assert!(remaining.is_empty());
+        assert_eq!(last_complete_telegram(&two), Some(SAMPLE));
     }
 
     #[test]
-    fn split_partial_telegram_at_end() {
-        // Buffer ends mid-telegram — incomplete part must be returned as remainder
+    fn last_telegram_ignores_partial_tail() {
         let partial = b"/EBZ5DD32R06ETA_107\r\n\r\n1-0:1.8.0*255(002714*kWh)\r\n";
         let full: Vec<u8> = [SAMPLE, partial.as_ref()].concat();
-        let (telegrams, remaining) = split_telegrams(&full);
-        assert_eq!(telegrams.len(), 1);
-        assert_eq!(remaining, partial.as_ref());
+        assert_eq!(last_complete_telegram(&full), Some(SAMPLE));
+    }
+
+    #[test]
+    fn last_telegram_none_when_incomplete() {
+        let partial = b"/EBZ5DD32R06ETA_107\r\n\r\n1-0:1.8.0*255(002714*kWh)\r\n";
+        assert_eq!(last_complete_telegram(partial), None);
     }
 
     #[test]
