@@ -158,8 +158,9 @@ fn run_sensor(
         };
 
         if !discovery_sent {
-            info!(sensor = %sensor.name, device_id = %telegram.device_id, "Publishing discovery");
-            for msg in mqtt::discovery_publishes(&sensor, &telegram.device_id, &node_id) {
+            let device_id = telegram.meter_id().unwrap_or(&telegram.device_id);
+            info!(sensor = %sensor.name, device_id = %device_id, "Publishing discovery");
+            for msg in mqtt::discovery_publishes(&sensor, device_id, &node_id) {
                 if tx.send(msg).is_err() {
                     return;
                 }

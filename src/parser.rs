@@ -61,6 +61,18 @@ pub struct Telegram {
     pub readings: Vec<Reading>,
 }
 
+impl Telegram {
+    pub fn meter_id(&self) -> Option<&str> {
+        self.readings.iter().find_map(|r| {
+            if let Reading::MeterId(v) = r {
+                Some(v.as_str())
+            } else {
+                None
+            }
+        })
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
     InvalidUtf8,
