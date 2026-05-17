@@ -37,7 +37,7 @@ sensor thread (one per port)
 Rather than reading the serial port continuously and throttling publication in userspace, the sensor thread reads exactly one telegram per publish interval:
 
 1. `tcflush(TCIFLUSH)` — discards all data buffered during sleep (the kernel TTY buffer fills and wraps after ~4 s at 9600 baud; we discard it rather than process stale readings).
-2. Raw-mode byte read loop — waits for `/`, accumulates bytes until a line-start `!` terminator, and resynchronizes if another `/` appears before the terminator. Takes at most one telegram period (~300 ms at 9600 baud).
+2. Raw-mode byte read loop — waits for `/`, accumulates bytes until `!`, and resynchronizes if another `/` appears before the terminator. Takes at most one telegram period (~300 ms at 9600 baud).
 3. Parse and publish.
 4. `thread::sleep(publish_interval)` — thread is fully dormant for the remainder of the interval.
 

@@ -25,18 +25,16 @@ pub fn read_telegram(port: &mut SerialPort) -> io::Result<Vec<u8>> {
 fn read_framed_telegram<R: Read>(reader: &mut R) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
-    let mut at_line_start = true;
 
     loop {
         if reader.read(&mut byte)? == 0 {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
         let b = byte[0];
-        if b == b'/' && at_line_start {
+        if b == b'/' {
             buf.push(b);
             break;
         }
-        at_line_start = b == b'\n' || b == b'\r';
     }
 
     loop {
@@ -44,18 +42,15 @@ fn read_framed_telegram<R: Read>(reader: &mut R) -> io::Result<Vec<u8>> {
             return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
         }
         let b = byte[0];
-        let was_line_start = at_line_start;
         if b == b'/' {
             buf.clear();
             buf.push(b);
-            at_line_start = false;
             continue;
         }
         buf.push(b);
-        if b == b'!' && was_line_start {
+        if b == b'!' {
             break;
         }
-        at_line_start = b == b'\n' || b == b'\r';
     }
 
     Ok(buf)
@@ -100,7 +95,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn framed_read_skips_slash_inside_partial_line() {
+    fn framed_read_resyncs_on_slash_inside_partial_line() {
         let mut input = io::Cursor::new(
             b"1-0:36.7.0*255(0001/EBZ5DD32R06ETA_107\r\n\
               1-0:1.8.0*255(000001.00000000*kWh)\r\n\
@@ -115,7 +110,7 @@ mod tests {
         assert_eq!(
             telegram,
             b"/EBZ5DD32R06ETA_107\r\n\
-              1-0:1.8.0*255(000002.00000000*kWh)\r\n\
+              1-0:1.8.0*255(000001.00000000*kWh)\r\n\
               !"
         );
     }
