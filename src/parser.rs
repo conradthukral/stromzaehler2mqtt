@@ -1,3 +1,6 @@
+const TELEGRAM_HEADER_PREFIX: char = '/';
+const TELEGRAM_TERMINATOR_PREFIX: char = '!';
+
 #[derive(Debug, PartialEq)]
 pub enum Reading {
     /// 1-0:0.0.0*255 — meter identification string
@@ -63,12 +66,9 @@ pub struct Telegram {
 
 impl Telegram {
     pub fn meter_id(&self) -> Option<&str> {
-        self.readings.iter().find_map(|r| {
-            if let Reading::MeterId(v) = r {
-                Some(v.as_str())
-            } else {
-                None
-            }
+        self.readings.iter().find_map(|reading| match reading {
+            Reading::MeterId(value) => Some(value.as_str()),
+            _ => None,
         })
     }
 }
@@ -95,18 +95,15 @@ pub fn parse_telegram(data: &[u8]) -> Result<Telegram, ParseError> {
     let mut lines = text.lines();
 
     let header = lines.next().ok_or(ParseError::MissingHeader)?;
-    if !header.starts_with('/') {
-        return Err(ParseError::MissingHeader);
-    }
-    let device_id = header[1..].trim().to_string();
+    let device_id = parse_device_id(header)?;
 
     let mut readings = Vec::new();
     for line in lines {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('!') {
+        if line.is_empty() || line.starts_with(TELEGRAM_TERMINATOR_PREFIX) {
             continue;
         }
-        readings.push(parse_data_line(line)?);
+        readings.push(parse_reading(line)?);
     }
 
     Ok(Telegram {
@@ -115,29 +112,26 @@ pub fn parse_telegram(data: &[u8]) -> Result<Telegram, ParseError> {
     })
 }
 
-fn parse_data_line(line: &str) -> Result<Reading, ParseError> {
-    let err = || ParseError::MalformedLine(line.to_string());
-    let (code, rest) = line.split_once('(').ok_or_else(err)?;
-    let value_part = rest.strip_suffix(')').ok_or_else(err)?;
-    let (value_str, unit) = match value_part.split_once('*') {
-        Some((v, u)) => (v, Some(u.to_string())),
-        None => (value_part, None),
-    };
+fn parse_device_id(header: &str) -> Result<String, ParseError> {
+    header
+        .strip_prefix(TELEGRAM_HEADER_PREFIX)
+        .map(|device_id| device_id.trim().to_string())
+        .ok_or(ParseError::MissingHeader)
+}
+
+fn parse_reading(line: &str) -> Result<Reading, ParseError> {
+    let (code, value_str, unit) = split_reading_parts(line)?;
     let reading = match code {
         "1-0:0.0.0*255" => Reading::MeterId(value_str.to_string()),
         "1-0:96.1.0*255" => Reading::SerialNumber(value_str.to_string()),
-        "1-0:1.8.0*255" => Reading::EnergyImport(value_str.parse().map_err(|_| err())?),
-        "1-0:2.8.0*255" => Reading::EnergyExport(value_str.parse().map_err(|_| err())?),
-        "1-0:16.7.0*255" => Reading::PowerTotal(value_str.parse().map_err(|_| err())?),
-        "1-0:36.7.0*255" => Reading::PowerL1(value_str.parse().map_err(|_| err())?),
-        "1-0:56.7.0*255" => Reading::PowerL2(value_str.parse().map_err(|_| err())?),
-        "1-0:76.7.0*255" => Reading::PowerL3(value_str.parse().map_err(|_| err())?),
-        "1-0:96.5.0*255" => {
-            Reading::StatusFlags(u32::from_str_radix(value_str, 16).map_err(|_| err())?)
-        }
-        "0-0:96.8.0*255" => {
-            Reading::OperatingTime(u32::from_str_radix(value_str, 16).map_err(|_| err())?)
-        }
+        "1-0:1.8.0*255" => Reading::EnergyImport(parse_decimal(line, value_str)?),
+        "1-0:2.8.0*255" => Reading::EnergyExport(parse_decimal(line, value_str)?),
+        "1-0:16.7.0*255" => Reading::PowerTotal(parse_decimal(line, value_str)?),
+        "1-0:36.7.0*255" => Reading::PowerL1(parse_decimal(line, value_str)?),
+        "1-0:56.7.0*255" => Reading::PowerL2(parse_decimal(line, value_str)?),
+        "1-0:76.7.0*255" => Reading::PowerL3(parse_decimal(line, value_str)?),
+        "1-0:96.5.0*255" => Reading::StatusFlags(parse_hex(line, value_str)?),
+        "0-0:96.8.0*255" => Reading::OperatingTime(parse_hex(line, value_str)?),
         other => Reading::Unknown {
             code: other.to_string(),
             value: value_str.to_string(),
@@ -145,6 +139,28 @@ fn parse_data_line(line: &str) -> Result<Reading, ParseError> {
         },
     };
     Ok(reading)
+}
+
+fn split_reading_parts(line: &str) -> Result<(&str, &str, Option<String>), ParseError> {
+    let (code, rest) = line.split_once('(').ok_or_else(|| malformed_line(line))?;
+    let value_part = rest.strip_suffix(')').ok_or_else(|| malformed_line(line))?;
+    let (value, unit) = match value_part.split_once('*') {
+        Some((value, unit)) => (value, Some(unit.to_string())),
+        None => (value_part, None),
+    };
+    Ok((code, value, unit))
+}
+
+fn parse_decimal(line: &str, value: &str) -> Result<f64, ParseError> {
+    value.parse().map_err(|_| malformed_line(line))
+}
+
+fn parse_hex(line: &str, value: &str) -> Result<u32, ParseError> {
+    u32::from_str_radix(value, 16).map_err(|_| malformed_line(line))
+}
+
+fn malformed_line(line: &str) -> ParseError {
+    ParseError::MalformedLine(line.to_string())
 }
 
 #[cfg(test)]
@@ -166,6 +182,10 @@ mod tests {
         0-0:96.8.0*255(02FAB8BF)\r\n\
         !\r\n";
 
+    fn sample_telegram() -> Telegram {
+        parse_telegram(SAMPLE).unwrap()
+    }
+
     fn parse_single_line(line: &str) -> Reading {
         let telegram = format!("/EBZ\r\n{line}\r\n!\r\n");
         let parsed = parse_telegram(telegram.as_bytes()).unwrap();
@@ -173,82 +193,71 @@ mod tests {
         parsed.readings.into_iter().next().unwrap()
     }
 
+    fn assert_sample_contains(expected: Reading) {
+        let telegram = sample_telegram();
+        assert!(telegram.readings.contains(&expected));
+    }
+
     #[test]
     fn parse_device_id() {
-        let t = parse_telegram(SAMPLE).unwrap();
+        let t = sample_telegram();
         assert_eq!(t.device_id, "EBZ5DD32R06ETA_107");
     }
 
     #[test]
     fn parse_reading_count() {
-        let t = parse_telegram(SAMPLE).unwrap();
+        let t = sample_telegram();
         assert_eq!(t.readings.len(), 10);
     }
 
     #[test]
     fn parse_energy_import() {
-        let t = parse_telegram(SAMPLE).unwrap();
-        assert!(t.readings.contains(&Reading::EnergyImport(2714.12830185)));
+        assert_sample_contains(Reading::EnergyImport(2714.12830185));
     }
 
     #[test]
     fn parse_meter_id() {
-        let t = parse_telegram(SAMPLE).unwrap();
-        assert!(
-            t.readings
-                .contains(&Reading::MeterId("1EBZ0102861889".to_string()))
-        );
+        assert_sample_contains(Reading::MeterId("1EBZ0102861889".to_string()));
     }
 
     #[test]
     fn parse_serial_number() {
-        let t = parse_telegram(SAMPLE).unwrap();
-        assert!(
-            t.readings
-                .contains(&Reading::SerialNumber("1EBZ0102861889".to_string()))
-        );
+        assert_sample_contains(Reading::SerialNumber("1EBZ0102861889".to_string()));
     }
 
     #[test]
     fn parse_energy_export() {
-        let t = parse_telegram(SAMPLE).unwrap();
-        assert!(t.readings.contains(&Reading::EnergyExport(1.206)));
+        assert_sample_contains(Reading::EnergyExport(1.206));
     }
 
     #[test]
     fn parse_power_total() {
-        let t = parse_telegram(SAMPLE).unwrap();
-        assert!(t.readings.contains(&Reading::PowerTotal(211.26)));
+        assert_sample_contains(Reading::PowerTotal(211.26));
     }
 
     #[test]
     fn parse_power_l1() {
-        let t = parse_telegram(SAMPLE).unwrap();
-        assert!(t.readings.contains(&Reading::PowerL1(157.64)));
+        assert_sample_contains(Reading::PowerL1(157.64));
     }
 
     #[test]
     fn parse_power_l2() {
-        let t = parse_telegram(SAMPLE).unwrap();
-        assert!(t.readings.contains(&Reading::PowerL2(15.64)));
+        assert_sample_contains(Reading::PowerL2(15.64));
     }
 
     #[test]
     fn parse_power_l3() {
-        let t = parse_telegram(SAMPLE).unwrap();
-        assert!(t.readings.contains(&Reading::PowerL3(37.98)));
+        assert_sample_contains(Reading::PowerL3(37.98));
     }
 
     #[test]
     fn parse_status_flags() {
-        let t = parse_telegram(SAMPLE).unwrap();
-        assert!(t.readings.contains(&Reading::StatusFlags(0x001C0104)));
+        assert_sample_contains(Reading::StatusFlags(0x001C0104));
     }
 
     #[test]
     fn parse_operating_time() {
-        let t = parse_telegram(SAMPLE).unwrap();
-        assert!(t.readings.contains(&Reading::OperatingTime(0x02FAB8BF)));
+        assert_sample_contains(Reading::OperatingTime(0x02FAB8BF));
     }
 
     #[test]

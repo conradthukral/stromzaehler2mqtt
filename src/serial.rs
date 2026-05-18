@@ -2,6 +2,9 @@ use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, RawFd};
 
+const TELEGRAM_START: u8 = b'/';
+const TELEGRAM_END: u8 = b'!';
+
 pub struct SerialPort {
     pub file: std::fs::File,
     pub fd: RawFd,
@@ -24,36 +27,37 @@ pub fn read_telegram(port: &mut SerialPort) -> io::Result<Vec<u8>> {
 
 fn read_framed_telegram<R: Read>(reader: &mut R) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
-    let mut byte = [0u8; 1];
 
     loop {
-        if reader.read(&mut byte)? == 0 {
-            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-        }
-        let b = byte[0];
-        if b == b'/' {
-            buf.push(b);
+        let byte = read_byte(reader)?;
+        if byte == TELEGRAM_START {
+            buf.push(byte);
             break;
         }
     }
 
     loop {
-        if reader.read(&mut byte)? == 0 {
-            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-        }
-        let b = byte[0];
-        if b == b'/' {
+        let byte = read_byte(reader)?;
+        if byte == TELEGRAM_START {
             buf.clear();
-            buf.push(b);
+            buf.push(byte);
             continue;
         }
-        buf.push(b);
-        if b == b'!' {
+        buf.push(byte);
+        if byte == TELEGRAM_END {
             break;
         }
     }
 
     Ok(buf)
+}
+
+fn read_byte<R: Read>(reader: &mut R) -> io::Result<u8> {
+    let mut byte = [0u8; 1];
+    if reader.read(&mut byte)? == 0 {
+        return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+    }
+    Ok(byte[0])
 }
 
 fn configure_tty(fd: RawFd, baud_rate: u32) -> io::Result<()> {

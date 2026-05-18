@@ -5,6 +5,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 use tracing::{error, info};
 
+const MQTT_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+
 trait TelegramReader {
     fn read_telegram(&mut self) -> io::Result<Vec<u8>>;
 }
@@ -79,29 +81,11 @@ fn run_mqtt_loop_with<F, S>(
     S: FnMut(Duration),
 {
     loop {
-        let mut client = loop {
-            match factory.connect(host, port, client_id) {
-                Ok(c) => {
-                    info!("MQTT connected to {host}:{port}");
-                    break c;
-                }
-                Err(e) => {
-                    error!("MQTT connect failed: {e}");
-                    sleep(Duration::from_secs(5));
-                }
-            }
-        };
+        let mut client = connect_mqtt_with_retry(host, port, client_id, factory, &mut sleep);
 
-        loop {
-            match rx.recv() {
-                Ok(msg) => {
-                    if let Err(e) = client.publish(&msg.topic, msg.payload.as_bytes(), msg.retain) {
-                        error!("MQTT publish error: {e}, reconnecting");
-                        break;
-                    }
-                }
-                Err(_) => return,
-            }
+        match publish_until_error_or_disconnect(&rx, &mut client) {
+            PublishLoopAction::Reconnect => continue,
+            PublishLoopAction::Shutdown => return,
         }
     }
 }
@@ -148,20 +132,13 @@ fn run_sensor_loop<R, S>(
     R: TelegramReader,
     S: FnMut(Duration),
 {
-    let discovery_telegram = match reader.read_telegram() {
-        Ok(raw) => match parse_discovery_telegram(&raw) {
-            Ok(telegram) => telegram,
-            Err(e) => {
-                error!(sensor = %config.name, "Parse error: {e}");
-                return;
-            }
-        },
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-            info!(sensor = %config.name, "Serial port closed");
-            return;
-        }
-        Err(e) => {
-            error!(sensor = %config.name, "Read error: {e}");
+    let Some(discovery_raw) = read_sensor_telegram(reader, &config.name) else {
+        return;
+    };
+    let discovery_telegram = match parser::parse_telegram(&discovery_raw) {
+        Ok(telegram) => telegram,
+        Err(error) => {
+            error!(sensor = %config.name, "Parse error: {error}");
             return;
         }
     };
@@ -173,22 +150,14 @@ fn run_sensor_loop<R, S>(
     }
 
     loop {
-        let raw = match reader.read_telegram() {
-            Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                info!(sensor = %sensor.name, "Serial port closed");
-                return;
-            }
-            Err(e) => {
-                error!(sensor = %sensor.name, "Read error: {e}");
-                return;
-            }
+        let Some(raw) = read_sensor_telegram(reader, &sensor.name) else {
+            return;
         };
 
         let (telegram, messages) = match process_sensor_telegram(&sensor, &raw) {
             Ok(result) => result,
-            Err(e) => {
-                error!(sensor = %sensor.name, "Parse error: {e}");
+            Err(error) => {
+                error!(sensor = %sensor.name, "Parse error: {error}");
                 continue;
             }
         };
@@ -206,8 +175,70 @@ fn run_sensor_loop<R, S>(
     }
 }
 
-fn parse_discovery_telegram(raw: &[u8]) -> Result<parser::Telegram, parser::ParseError> {
-    parser::parse_telegram(raw)
+fn connect_mqtt_with_retry<F, S>(
+    host: &str,
+    port: u16,
+    client_id: &str,
+    factory: &mut F,
+    sleep: &mut S,
+) -> F::Client
+where
+    F: PublisherFactory,
+    S: FnMut(Duration),
+{
+    loop {
+        match factory.connect(host, port, client_id) {
+            Ok(client) => {
+                info!("MQTT connected to {host}:{port}");
+                return client;
+            }
+            Err(error) => {
+                error!("MQTT connect failed: {error}");
+                sleep(MQTT_RECONNECT_DELAY);
+            }
+        }
+    }
+}
+
+fn recv_publish(rx: &mpsc::Receiver<mqtt::Publish>) -> Option<mqtt::Publish> {
+    rx.recv().ok()
+}
+
+fn publish_message<P: Publisher>(client: &mut P, message: &mqtt::Publish) -> io::Result<()> {
+    client.publish(&message.topic, message.payload.as_bytes(), message.retain)
+}
+
+fn publish_until_error_or_disconnect<P: Publisher>(
+    rx: &mpsc::Receiver<mqtt::Publish>,
+    client: &mut P,
+) -> PublishLoopAction {
+    while let Some(message) = recv_publish(rx) {
+        if let Err(error) = publish_message(client, &message) {
+            error!("MQTT publish error: {error}, reconnecting");
+            return PublishLoopAction::Reconnect;
+        }
+    }
+
+    PublishLoopAction::Shutdown
+}
+
+fn read_sensor_telegram<R: TelegramReader>(reader: &mut R, sensor_name: &str) -> Option<Vec<u8>> {
+    match reader.read_telegram() {
+        Ok(raw) => Some(raw),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            info!(sensor = sensor_name, "Serial port closed");
+            None
+        }
+        Err(error) => {
+            error!(sensor = sensor_name, "Read error: {error}");
+            None
+        }
+    }
+}
+
+enum PublishLoopAction {
+    Reconnect,
+    Shutdown,
 }
 
 fn discovery_sensor(
@@ -262,12 +293,36 @@ mod tests {
     use std::collections::VecDeque;
     use std::rc::Rc;
 
+    const BASE_TOPIC: &str = "meters";
+    const NODE_ID: &str = "stromzaehler2mqtt";
+    const PUBLISH_INTERVAL: Duration = Duration::from_secs(15);
+
     fn sensor_config(name: &str) -> SensorConfig {
         SensorConfig {
             name: name.to_string(),
             serial_port: "/dev/null".to_string(),
             baud_rate: 9600,
         }
+    }
+
+    fn publish(topic: &str, payload: &str, retain: bool) -> mqtt::Publish {
+        mqtt::Publish {
+            topic: topic.to_string(),
+            payload: payload.to_string(),
+            retain,
+        }
+    }
+
+    fn state_publish(subtopic: &str, payload: &str) -> mqtt::Publish {
+        publish(&format!("{BASE_TOPIC}/main/{subtopic}"), payload, false)
+    }
+
+    fn queued_publish(subtopic: &str, payload: &str) -> mqtt::Publish {
+        state_publish(subtopic, payload)
+    }
+
+    fn drain_published(rx: &mpsc::Receiver<mqtt::Publish>) -> Vec<mqtt::Publish> {
+        rx.try_iter().collect()
     }
 
     enum ReadStep {
@@ -458,21 +513,9 @@ mod tests {
         assert_eq!(
             messages,
             vec![
-                mqtt::Publish {
-                    topic: "meters/main/energy_import".to_string(),
-                    payload: "2714.12830185".to_string(),
-                    retain: false,
-                },
-                mqtt::Publish {
-                    topic: "meters/main/energy_export".to_string(),
-                    payload: "1.206".to_string(),
-                    retain: false,
-                },
-                mqtt::Publish {
-                    topic: "meters/main/power_total".to_string(),
-                    payload: "211.26".to_string(),
-                    retain: false,
-                },
+                state_publish("energy_import", "2714.12830185"),
+                state_publish("energy_export", "1.206"),
+                state_publish("power_total", "211.26"),
             ]
         );
     }
@@ -491,35 +534,19 @@ mod tests {
     fn publish_messages_returns_true_and_sends_all_messages_in_order() {
         let (tx, rx) = mpsc::channel();
         let messages = vec![
-            mqtt::Publish {
-                topic: "meters/main/energy_import".to_string(),
-                payload: "1.0".to_string(),
-                retain: false,
-            },
-            mqtt::Publish {
-                topic: "meters/main/power_total".to_string(),
-                payload: "2.0".to_string(),
-                retain: false,
-            },
+            state_publish("energy_import", "1.0"),
+            state_publish("power_total", "2.0"),
         ];
 
         let sent = publish_messages(&tx, messages);
-        let received: Vec<_> = rx.try_iter().collect();
+        let received = drain_published(&rx);
 
         assert!(sent);
         assert_eq!(
             received,
             vec![
-                mqtt::Publish {
-                    topic: "meters/main/energy_import".to_string(),
-                    payload: "1.0".to_string(),
-                    retain: false,
-                },
-                mqtt::Publish {
-                    topic: "meters/main/power_total".to_string(),
-                    payload: "2.0".to_string(),
-                    retain: false,
-                },
+                state_publish("energy_import", "1.0"),
+                state_publish("power_total", "2.0"),
             ]
         );
     }
@@ -529,14 +556,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         drop(rx);
 
-        let sent = publish_messages(
-            &tx,
-            vec![mqtt::Publish {
-                topic: "meters/main/energy_import".to_string(),
-                payload: "1.0".to_string(),
-                retain: false,
-            }],
-        );
+        let sent = publish_messages(&tx, vec![state_publish("energy_import", "1.0")]);
 
         assert!(!sent);
     }
@@ -557,39 +577,26 @@ mod tests {
             &config,
             &mut reader,
             &tx,
-            Duration::from_secs(15),
-            "meters",
-            "stromzaehler2mqtt",
+            PUBLISH_INTERVAL,
+            BASE_TOPIC,
+            NODE_ID,
             |duration| sleeps.push(duration),
         );
         drop(tx);
 
-        let published: Vec<_> = rx.try_iter().collect();
+        let published = drain_published(&rx);
 
-        assert_eq!(sleeps, vec![Duration::from_secs(15)]);
+        assert_eq!(sleeps, vec![PUBLISH_INTERVAL]);
         assert_eq!(published.len(), 6);
-        assert!(published.iter().take(3).all(|msg| {
-            msg.topic
-                .starts_with("homeassistant/sensor/stromzaehler2mqtt/")
-        }));
+        assert!(published.iter().take(3).all(|msg| msg
+            .topic
+            .starts_with("homeassistant/sensor/stromzaehler2mqtt/")));
         assert_eq!(
             published[3..],
             [
-                mqtt::Publish {
-                    topic: "meters/main/energy_import".to_string(),
-                    payload: "2714.12830185".to_string(),
-                    retain: false,
-                },
-                mqtt::Publish {
-                    topic: "meters/main/energy_export".to_string(),
-                    payload: "1.206".to_string(),
-                    retain: false,
-                },
-                mqtt::Publish {
-                    topic: "meters/main/power_total".to_string(),
-                    payload: "211.26".to_string(),
-                    retain: false,
-                },
+                state_publish("energy_import", "2714.12830185"),
+                state_publish("energy_export", "1.206"),
+                state_publish("power_total", "211.26"),
             ]
         );
     }
@@ -605,14 +612,14 @@ mod tests {
             &config,
             &mut reader,
             &tx,
-            Duration::from_secs(15),
-            "meters",
-            "stromzaehler2mqtt",
+            PUBLISH_INTERVAL,
+            BASE_TOPIC,
+            NODE_ID,
             |_| slept = true,
         );
         drop(tx);
 
-        let published: Vec<_> = rx.try_iter().collect();
+        let published = drain_published(&rx);
 
         assert!(!slept);
         assert_eq!(published.len(), 3);
@@ -633,14 +640,14 @@ mod tests {
             &config,
             &mut reader,
             &tx,
-            Duration::from_secs(15),
-            "meters",
-            "stromzaehler2mqtt",
+            PUBLISH_INTERVAL,
+            BASE_TOPIC,
+            NODE_ID,
             |_| slept = true,
         );
         drop(tx);
 
-        let published: Vec<_> = rx.try_iter().collect();
+        let published = drain_published(&rx);
 
         assert!(!slept);
         assert_eq!(published.len(), 3);
@@ -650,12 +657,7 @@ mod tests {
     #[test]
     fn run_mqtt_loop_retries_connect_until_success() {
         let (tx, rx) = mpsc::channel();
-        tx.send(mqtt::Publish {
-            topic: "meters/main/energy_import".to_string(),
-            payload: "1.0".to_string(),
-            retain: false,
-        })
-        .unwrap();
+        tx.send(queued_publish("energy_import", "1.0")).unwrap();
         drop(tx);
 
         let (mut factory, state) = FakePublisherFactory::new([
@@ -671,17 +673,13 @@ mod tests {
         });
 
         let state = state.borrow();
-        assert_eq!(sleeps, vec![Duration::from_secs(5)]);
+        assert_eq!(sleeps, vec![MQTT_RECONNECT_DELAY]);
         assert_eq!(state.connect_attempts, 2);
         assert_eq!(
             state.publish_attempts,
             vec![PublishAttempt {
                 connection_id: 0,
-                publish: mqtt::Publish {
-                    topic: "meters/main/energy_import".to_string(),
-                    payload: "1.0".to_string(),
-                    retain: false,
-                },
+                publish: queued_publish("energy_import", "1.0"),
             }]
         );
     }
@@ -689,18 +687,8 @@ mod tests {
     #[test]
     fn run_mqtt_loop_reconnects_after_publish_failure() {
         let (tx, rx) = mpsc::channel();
-        tx.send(mqtt::Publish {
-            topic: "meters/main/energy_import".to_string(),
-            payload: "1.0".to_string(),
-            retain: false,
-        })
-        .unwrap();
-        tx.send(mqtt::Publish {
-            topic: "meters/main/power_total".to_string(),
-            payload: "2.0".to_string(),
-            retain: false,
-        })
-        .unwrap();
+        tx.send(queued_publish("energy_import", "1.0")).unwrap();
+        tx.send(queued_publish("power_total", "2.0")).unwrap();
         drop(tx);
 
         let (mut factory, state) = FakePublisherFactory::new([
@@ -721,19 +709,11 @@ mod tests {
             vec![
                 PublishAttempt {
                     connection_id: 0,
-                    publish: mqtt::Publish {
-                        topic: "meters/main/energy_import".to_string(),
-                        payload: "1.0".to_string(),
-                        retain: false,
-                    },
+                    publish: queued_publish("energy_import", "1.0"),
                 },
                 PublishAttempt {
                     connection_id: 1,
-                    publish: mqtt::Publish {
-                        topic: "meters/main/power_total".to_string(),
-                        payload: "2.0".to_string(),
-                        retain: false,
-                    },
+                    publish: queued_publish("power_total", "2.0"),
                 },
             ]
         );

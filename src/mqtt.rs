@@ -17,9 +17,9 @@ impl Sensor {
         device_id: impl Into<String>,
     ) -> Self {
         let name = name.into();
-        let sanitized_name = sanitize_device_id(&name);
+        let sanitized_name = sanitize_topic_segment(&name);
         let device_id = device_id.into();
-        let sanitized_device_id = sanitize_device_id(&device_id);
+        let sanitized_device_id = sanitize_topic_segment(&device_id);
         Self {
             name,
             sanitized_name,
@@ -27,6 +27,10 @@ impl Sensor {
             device_id,
             sanitized_device_id,
         }
+    }
+
+    fn device_key(&self) -> String {
+        format!("{}_{}", self.sanitized_name, self.sanitized_device_id)
     }
 
     fn value_topic(&self, subtopic: &str) -> String {
@@ -73,7 +77,7 @@ const READINGS: &[ReadingMeta] = &[
     },
 ];
 
-fn sanitize_device_id(s: &str) -> String {
+fn sanitize_topic_segment(s: &str) -> String {
     s.to_lowercase()
         .replace('ä', "ae")
         .replace('ö', "oe")
@@ -96,7 +100,7 @@ fn reading_to_state(reading: &Reading) -> Option<(&'static str, String)> {
 
 /// Returns (config_topic, payload_json) pairs for all discovery entries.
 fn discovery_entries(sensor: &Sensor, node_id: &str) -> Vec<(String, String)> {
-    let device_key = format!("{}_{}", sensor.sanitized_name, sensor.sanitized_device_id);
+    let device_key = sensor.device_key();
     READINGS
         .iter()
         .map(|meta| {
@@ -152,15 +156,15 @@ mod tests {
     #[test]
     fn sanitize_lowercase_and_replace() {
         assert_eq!(
-            sanitize_device_id("EBZ5DD32R06ETA_107"),
+            sanitize_topic_segment("EBZ5DD32R06ETA_107"),
             "ebz5dd32r06eta_107"
         );
-        assert_eq!(sanitize_device_id("EBZ-DD3.2R"), "ebz_dd3_2r");
-        assert_eq!(sanitize_device_id("abc123"), "abc123");
-        assert_eq!(sanitize_device_id("Haushalt"), "haushalt");
-        assert_eq!(sanitize_device_id("Küche"), "kueche");
-        assert_eq!(sanitize_device_id("ÜBER"), "ueber");
-        assert_eq!(sanitize_device_id("Straße"), "strasse");
+        assert_eq!(sanitize_topic_segment("EBZ-DD3.2R"), "ebz_dd3_2r");
+        assert_eq!(sanitize_topic_segment("abc123"), "abc123");
+        assert_eq!(sanitize_topic_segment("Haushalt"), "haushalt");
+        assert_eq!(sanitize_topic_segment("Küche"), "kueche");
+        assert_eq!(sanitize_topic_segment("ÜBER"), "ueber");
+        assert_eq!(sanitize_topic_segment("Straße"), "strasse");
     }
 
     #[test]
