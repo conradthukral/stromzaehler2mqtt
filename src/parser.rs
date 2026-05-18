@@ -166,6 +166,13 @@ mod tests {
         0-0:96.8.0*255(02FAB8BF)\r\n\
         !\r\n";
 
+    fn parse_single_line(line: &str) -> Reading {
+        let telegram = format!("/EBZ\r\n{line}\r\n!\r\n");
+        let parsed = parse_telegram(telegram.as_bytes()).unwrap();
+        assert_eq!(parsed.readings.len(), 1);
+        parsed.readings.into_iter().next().unwrap()
+    }
+
     #[test]
     fn parse_device_id() {
         let t = parse_telegram(SAMPLE).unwrap();
@@ -194,6 +201,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_serial_number() {
+        let t = parse_telegram(SAMPLE).unwrap();
+        assert!(
+            t.readings
+                .contains(&Reading::SerialNumber("1EBZ0102861889".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_energy_export() {
+        let t = parse_telegram(SAMPLE).unwrap();
+        assert!(t.readings.contains(&Reading::EnergyExport(1.206)));
+    }
+
+    #[test]
+    fn parse_power_total() {
+        let t = parse_telegram(SAMPLE).unwrap();
+        assert!(t.readings.contains(&Reading::PowerTotal(211.26)));
+    }
+
+    #[test]
+    fn parse_power_l1() {
+        let t = parse_telegram(SAMPLE).unwrap();
+        assert!(t.readings.contains(&Reading::PowerL1(157.64)));
+    }
+
+    #[test]
+    fn parse_power_l2() {
+        let t = parse_telegram(SAMPLE).unwrap();
+        assert!(t.readings.contains(&Reading::PowerL2(15.64)));
+    }
+
+    #[test]
+    fn parse_power_l3() {
+        let t = parse_telegram(SAMPLE).unwrap();
+        assert!(t.readings.contains(&Reading::PowerL3(37.98)));
+    }
+
+    #[test]
     fn parse_status_flags() {
         let t = parse_telegram(SAMPLE).unwrap();
         assert!(t.readings.contains(&Reading::StatusFlags(0x001C0104)));
@@ -206,6 +252,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_unknown_obis_with_unit() {
+        assert_eq!(
+            parse_single_line("1-0:99.9.9*255(123.45*kvarh)"),
+            Reading::Unknown {
+                code: "1-0:99.9.9*255".to_string(),
+                value: "123.45".to_string(),
+                unit: Some("kvarh".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_unknown_obis_without_unit() {
+        assert_eq!(
+            parse_single_line("1-0:99.9.9*255(opaque-value)"),
+            Reading::Unknown {
+                code: "1-0:99.9.9*255".to_string(),
+                value: "opaque-value".to_string(),
+                unit: None,
+            }
+        );
+    }
+
+    #[test]
     fn malformed_line_missing_parens() {
         let bad = b"/EBZ\r\n\r\n1-0:1.8.0*255 no parens here\r\n!\r\n";
         assert!(matches!(
@@ -215,11 +285,87 @@ mod tests {
     }
 
     #[test]
+    fn malformed_line_invalid_float_value() {
+        let bad = b"/EBZ\r\n\r\n1-0:1.8.0*255(not-a-float*kWh)\r\n!\r\n";
+        assert_eq!(
+            parse_telegram(bad),
+            Err(ParseError::MalformedLine(
+                "1-0:1.8.0*255(not-a-float*kWh)".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn malformed_line_invalid_hex_value() {
+        let bad = b"/EBZ\r\n\r\n1-0:96.5.0*255(nothex)\r\n!\r\n";
+        assert_eq!(
+            parse_telegram(bad),
+            Err(ParseError::MalformedLine(
+                "1-0:96.5.0*255(nothex)".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn invalid_utf8() {
+        assert_eq!(
+            parse_telegram(b"/EBZ\xff\r\n!\r\n"),
+            Err(ParseError::InvalidUtf8)
+        );
+    }
+
+    #[test]
     fn missing_header() {
         assert_eq!(parse_telegram(b""), Err(ParseError::MissingHeader));
         assert_eq!(
             parse_telegram(b"no slash\r\n!\r\n"),
             Err(ParseError::MissingHeader)
+        );
+    }
+
+    #[test]
+    fn display_reading_variants() {
+        assert_eq!(
+            Reading::SerialNumber("1EBZ0102861889".to_string()).to_string(),
+            "Serial Number (96.1.0) = 1EBZ0102861889"
+        );
+        assert_eq!(
+            Reading::PowerL2(15.64).to_string(),
+            "Power L2 (56.7.0) = 15.64 W"
+        );
+        assert_eq!(
+            Reading::Unknown {
+                code: "1-0:99.9.9*255".to_string(),
+                value: "opaque-value".to_string(),
+                unit: Some("kvarh".to_string()),
+            }
+            .to_string(),
+            "1-0:99.9.9*255 = opaque-value kvarh"
+        );
+        assert_eq!(
+            Reading::Unknown {
+                code: "1-0:99.9.9*255".to_string(),
+                value: "opaque-value".to_string(),
+                unit: None,
+            }
+            .to_string(),
+            "1-0:99.9.9*255 = opaque-value"
+        );
+    }
+
+    #[test]
+    fn display_parse_error_variants() {
+        assert_eq!(
+            ParseError::InvalidUtf8.to_string(),
+            "invalid UTF-8 in telegram"
+        );
+        assert_eq!(
+            ParseError::MissingHeader.to_string(),
+            "telegram does not start with '/'"
+        );
+        assert_eq!(
+            ParseError::MalformedLine("broken".to_string()).to_string(),
+            "malformed data line: \"broken\""
         );
     }
 }
