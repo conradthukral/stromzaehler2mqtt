@@ -69,16 +69,15 @@ pub fn load_config(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_CONFIG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_config_path() -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let counter = TEMP_CONFIG_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "stromzaehler2mqtt-config-{}-{nanos}.yaml",
-            std::process::id()
+            "stromzaehler2mqtt-config-{}-{counter}.yaml",
+            std::process::id(),
         ))
     }
 

@@ -161,4 +161,25 @@ mod tests {
               !"
         );
     }
+
+    #[test]
+    fn framed_read_errors_on_eof_before_header() {
+        let mut input = io::Cursor::new(b"noise only");
+
+        let err = read_framed_telegram(&mut input).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn framed_read_errors_on_eof_after_header_before_terminator() {
+        let mut input = io::Cursor::new(
+            b"/EBZ5DD32R06ETA_107\r\n\
+              1-0:1.8.0*255(000002.00000000*kWh)\r\n",
+        );
+
+        let err = read_framed_telegram(&mut input).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
 }

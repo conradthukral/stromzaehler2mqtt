@@ -75,8 +75,8 @@ fn run_sensor(
     info!(sensor = %config.name, "Serial port open, reading data");
 
     let discovery_telegram = match serial::read_telegram(&mut port) {
-        Ok(b) => match parser::parse_telegram(&b) {
-            Ok(t) => t,
+        Ok(raw) => match parse_discovery_telegram(&raw) {
+            Ok(telegram) => telegram,
             Err(e) => {
                 error!(sensor = %config.name, "Parse error: {e}");
                 return;
@@ -92,15 +92,10 @@ fn run_sensor(
         }
     };
 
-    let device_id = discovery_telegram
-        .meter_id()
-        .unwrap_or(&discovery_telegram.device_id);
-    let sensor = mqtt::Sensor::new(&config.name, base_topic, device_id);
+    let sensor = discovery_sensor(&config, &base_topic, &discovery_telegram);
     info!(sensor = %sensor.name, device_id = %sensor.device_id, "Publishing discovery");
-    for msg in mqtt::discovery_publishes(&sensor, &node_id) {
-        if tx.send(msg).is_err() {
-            return;
-        }
+    if !publish_messages(&tx, discovery_messages(&sensor, &node_id)) {
+        return;
     }
 
     loop {
@@ -116,8 +111,8 @@ fn run_sensor(
             }
         };
 
-        let telegram = match parser::parse_telegram(&raw) {
-            Ok(t) => t,
+        let (telegram, messages) = match process_sensor_telegram(&sensor, &raw) {
+            Ok(result) => result,
             Err(e) => {
                 error!(sensor = %sensor.name, "Parse error: {e}");
                 continue;
@@ -125,10 +120,8 @@ fn run_sensor(
         };
 
         log_telegram(&sensor.name, &telegram);
-        for msg in mqtt::reading_publishes(&sensor, &telegram) {
-            if tx.send(msg).is_err() {
-                return;
-            }
+        if !publish_messages(&tx, messages) {
+            return;
         }
 
         // Sleep keeps the process fully dormant between publishes (~0% CPU).
@@ -139,9 +132,201 @@ fn run_sensor(
     }
 }
 
+fn parse_discovery_telegram(raw: &[u8]) -> Result<parser::Telegram, parser::ParseError> {
+    parser::parse_telegram(raw)
+}
+
+fn discovery_sensor(
+    config: &SensorConfig,
+    base_topic: &str,
+    discovery_telegram: &parser::Telegram,
+) -> mqtt::Sensor {
+    let device_id = discovery_telegram
+        .meter_id()
+        .unwrap_or(&discovery_telegram.device_id);
+    mqtt::Sensor::new(&config.name, base_topic, device_id)
+}
+
+fn discovery_messages(sensor: &mqtt::Sensor, node_id: &str) -> Vec<mqtt::Publish> {
+    mqtt::discovery_publishes(sensor, node_id)
+}
+
+fn reading_messages(sensor: &mqtt::Sensor, telegram: &parser::Telegram) -> Vec<mqtt::Publish> {
+    mqtt::reading_publishes(sensor, telegram)
+}
+
+fn process_sensor_telegram(
+    sensor: &mqtt::Sensor,
+    raw: &[u8],
+) -> Result<(parser::Telegram, Vec<mqtt::Publish>), parser::ParseError> {
+    let telegram = parser::parse_telegram(raw)?;
+    let messages = reading_messages(sensor, &telegram);
+    Ok((telegram, messages))
+}
+
+fn publish_messages(tx: &mpsc::Sender<mqtt::Publish>, messages: Vec<mqtt::Publish>) -> bool {
+    for msg in messages {
+        if tx.send(msg).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
 fn log_telegram(label: &str, t: &parser::Telegram) {
     info!("[{label}] device={}", t.device_id);
     for r in &t.readings {
         info!("[{label}]   {r}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::Reading;
+
+    fn sensor_config(name: &str) -> SensorConfig {
+        SensorConfig {
+            name: name.to_string(),
+            serial_port: "/dev/null".to_string(),
+            baud_rate: 9600,
+        }
+    }
+
+    #[test]
+    fn discovery_uses_meter_id_when_present() {
+        let telegram = parser::Telegram {
+            device_id: "EBZ5DD32R06ETA_107".to_string(),
+            readings: vec![Reading::MeterId("1EBZ0102861889".to_string())],
+        };
+
+        let sensor = discovery_sensor(&sensor_config("main"), "meters", &telegram);
+
+        assert_eq!(sensor.name, "main");
+        assert_eq!(sensor.base_topic, "meters");
+        assert_eq!(sensor.device_id, "1EBZ0102861889");
+    }
+
+    #[test]
+    fn discovery_falls_back_to_device_id_without_meter_id() {
+        let telegram = parser::Telegram {
+            device_id: "EBZ5DD32R06ETA_107".to_string(),
+            readings: vec![Reading::EnergyImport(2714.12830185)],
+        };
+
+        let sensor = discovery_sensor(&sensor_config("main"), "meters", &telegram);
+
+        assert_eq!(sensor.device_id, "EBZ5DD32R06ETA_107");
+    }
+
+    #[test]
+    fn process_sensor_telegram_returns_expected_reading_messages() {
+        let sensor = mqtt::Sensor::new("main", "meters", "1EBZ0102861889");
+        let raw = b"/EBZ5DD32R06ETA_107\r\n\
+1-0:1.8.0*255(002714.12830185*kWh)\r\n\
+1-0:2.8.0*255(000001.20600000*kWh)\r\n\
+1-0:16.7.0*255(000211.26*W)\r\n\
+1-0:36.7.0*255(000157.64*W)\r\n\
+!\r\n";
+
+        let (telegram, messages) = process_sensor_telegram(&sensor, raw).unwrap();
+
+        assert_eq!(
+            telegram,
+            parser::Telegram {
+                device_id: "EBZ5DD32R06ETA_107".to_string(),
+                readings: vec![
+                    Reading::EnergyImport(2714.12830185),
+                    Reading::EnergyExport(1.206),
+                    Reading::PowerTotal(211.26),
+                    Reading::PowerL1(157.64),
+                ],
+            }
+        );
+
+        assert_eq!(
+            messages,
+            vec![
+                mqtt::Publish {
+                    topic: "meters/main/energy_import".to_string(),
+                    payload: "2714.12830185".to_string(),
+                    retain: false,
+                },
+                mqtt::Publish {
+                    topic: "meters/main/energy_export".to_string(),
+                    payload: "1.206".to_string(),
+                    retain: false,
+                },
+                mqtt::Publish {
+                    topic: "meters/main/power_total".to_string(),
+                    payload: "211.26".to_string(),
+                    retain: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_sensor_telegram_is_returned_as_error() {
+        let sensor = mqtt::Sensor::new("main", "meters", "1EBZ0102861889");
+        let raw = b"/EBZ5DD32R06ETA_107\r\n1-0:1.8.0*255(bad*kWh)\r\n!\r\n";
+
+        let err = process_sensor_telegram(&sensor, raw).unwrap_err();
+
+        assert!(matches!(err, parser::ParseError::MalformedLine(_)));
+    }
+
+    #[test]
+    fn publish_messages_returns_true_and_sends_all_messages_in_order() {
+        let (tx, rx) = mpsc::channel();
+        let messages = vec![
+            mqtt::Publish {
+                topic: "meters/main/energy_import".to_string(),
+                payload: "1.0".to_string(),
+                retain: false,
+            },
+            mqtt::Publish {
+                topic: "meters/main/power_total".to_string(),
+                payload: "2.0".to_string(),
+                retain: false,
+            },
+        ];
+
+        let sent = publish_messages(&tx, messages);
+        let received: Vec<_> = rx.try_iter().collect();
+
+        assert!(sent);
+        assert_eq!(
+            received,
+            vec![
+                mqtt::Publish {
+                    topic: "meters/main/energy_import".to_string(),
+                    payload: "1.0".to_string(),
+                    retain: false,
+                },
+                mqtt::Publish {
+                    topic: "meters/main/power_total".to_string(),
+                    payload: "2.0".to_string(),
+                    retain: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn publish_messages_returns_false_when_channel_is_closed() {
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+
+        let sent = publish_messages(
+            &tx,
+            vec![mqtt::Publish {
+                topic: "meters/main/energy_import".to_string(),
+                payload: "1.0".to_string(),
+                retain: false,
+            }],
+        );
+
+        assert!(!sent);
     }
 }

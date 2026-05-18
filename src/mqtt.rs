@@ -34,6 +34,7 @@ impl Sensor {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub struct Publish {
     pub topic: String,
     pub payload: String,
@@ -232,5 +233,61 @@ mod tests {
         assert_eq!(v["unique_id"], "main_ebz5dd32r06eta_107_energy_import");
         assert_eq!(v["device"]["name"], "main");
         assert_eq!(v["device"]["identifiers"][0], "main_ebz5dd32r06eta_107");
+    }
+
+    #[test]
+    fn discovery_publishes_are_retained_and_match_entries() {
+        let sensor = Sensor::new("main", "stromzaehler2mqtt", "EBZ5DD32R06ETA_107");
+
+        let publishes = discovery_publishes(&sensor, "stromzaehler2mqtt");
+
+        assert_eq!(publishes.len(), 3);
+        assert!(publishes.iter().all(|publish| publish.retain));
+        assert_eq!(
+            publishes[0].topic,
+            "homeassistant/sensor/stromzaehler2mqtt/main_ebz5dd32r06eta_107_energy_import/config"
+        );
+    }
+
+    #[test]
+    fn reading_publishes_only_emit_supported_readings_without_retain() {
+        let sensor = Sensor::new("main", "stromzaehler2mqtt", "EBZ5DD32R06ETA_107");
+        let telegram = Telegram {
+            device_id: "EBZ5DD32R06ETA_107".into(),
+            readings: vec![
+                Reading::EnergyImport(2714.128),
+                Reading::EnergyExport(1.206),
+                Reading::PowerTotal(211.26),
+                Reading::PowerL1(157.64),
+                Reading::Unknown {
+                    code: "1-0:99.9.9*255".into(),
+                    value: "ignored".into(),
+                    unit: Some("X".into()),
+                },
+            ],
+        };
+
+        let publishes = reading_publishes(&sensor, &telegram);
+
+        assert_eq!(
+            publishes,
+            vec![
+                Publish {
+                    topic: "stromzaehler2mqtt/main/energy_import".into(),
+                    payload: "2714.128".into(),
+                    retain: false,
+                },
+                Publish {
+                    topic: "stromzaehler2mqtt/main/energy_export".into(),
+                    payload: "1.206".into(),
+                    retain: false,
+                },
+                Publish {
+                    topic: "stromzaehler2mqtt/main/power_total".into(),
+                    payload: "211.26".into(),
+                    retain: false,
+                },
+            ]
+        );
     }
 }
