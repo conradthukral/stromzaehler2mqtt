@@ -15,6 +15,32 @@ impl TelegramReader for serial::SerialPort {
     }
 }
 
+trait Publisher {
+    fn publish(&mut self, topic: &str, payload: &[u8], retain: bool) -> io::Result<()>;
+}
+
+impl Publisher for mqtt_client::MqttClient {
+    fn publish(&mut self, topic: &str, payload: &[u8], retain: bool) -> io::Result<()> {
+        mqtt_client::MqttClient::publish(self, topic, payload, retain)
+    }
+}
+
+trait PublisherFactory {
+    type Client: Publisher;
+
+    fn connect(&mut self, host: &str, port: u16, client_id: &str) -> io::Result<Self::Client>;
+}
+
+struct MqttPublisherFactory;
+
+impl PublisherFactory for MqttPublisherFactory {
+    type Client = mqtt_client::MqttClient;
+
+    fn connect(&mut self, host: &str, port: u16, client_id: &str) -> io::Result<Self::Client> {
+        mqtt_client::MqttClient::connect(host, port, client_id)
+    }
+}
+
 pub fn run(config: Config) {
     let (tx, rx) = mpsc::channel::<mqtt::Publish>();
 
@@ -37,16 +63,31 @@ pub fn run(config: Config) {
 }
 
 fn run_mqtt_loop(rx: mpsc::Receiver<mqtt::Publish>, host: &str, port: u16, client_id: &str) {
+    let mut factory = MqttPublisherFactory;
+    run_mqtt_loop_with(rx, host, port, client_id, &mut factory, std::thread::sleep);
+}
+
+fn run_mqtt_loop_with<F, S>(
+    rx: mpsc::Receiver<mqtt::Publish>,
+    host: &str,
+    port: u16,
+    client_id: &str,
+    factory: &mut F,
+    mut sleep: S,
+) where
+    F: PublisherFactory,
+    S: FnMut(Duration),
+{
     loop {
         let mut client = loop {
-            match mqtt_client::MqttClient::connect(host, port, client_id) {
+            match factory.connect(host, port, client_id) {
                 Ok(c) => {
                     info!("MQTT connected to {host}:{port}");
                     break c;
                 }
                 Err(e) => {
                     error!("MQTT connect failed: {e}");
-                    std::thread::sleep(Duration::from_secs(5));
+                    sleep(Duration::from_secs(5));
                 }
             }
         };
@@ -217,7 +258,9 @@ fn log_telegram(label: &str, t: &parser::Telegram) {
 mod tests {
     use super::*;
     use crate::parser::Reading;
+    use std::cell::RefCell;
     use std::collections::VecDeque;
+    use std::rc::Rc;
 
     fn sensor_config(name: &str) -> SensorConfig {
         SensorConfig {
@@ -267,6 +310,98 @@ mod tests {
 1-0:2.8.0*255(000001.20600000*kWh)\r\n\
 1-0:16.7.0*255(000211.26*W)\r\n\
 !\r\n"
+    }
+
+    enum ConnectStep {
+        Ok {
+            publish_results: VecDeque<io::Result<()>>,
+        },
+        Err(io::ErrorKind),
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct PublishAttempt {
+        connection_id: usize,
+        publish: mqtt::Publish,
+    }
+
+    #[derive(Default)]
+    struct FakeFactoryState {
+        connect_attempts: usize,
+        next_connection_id: usize,
+        publish_attempts: Vec<PublishAttempt>,
+    }
+
+    struct FakePublisherFactory {
+        steps: VecDeque<ConnectStep>,
+        state: Rc<RefCell<FakeFactoryState>>,
+    }
+
+    impl FakePublisherFactory {
+        fn new(
+            steps: impl IntoIterator<Item = ConnectStep>,
+        ) -> (Self, Rc<RefCell<FakeFactoryState>>) {
+            let state = Rc::new(RefCell::new(FakeFactoryState::default()));
+            (
+                Self {
+                    steps: steps.into_iter().collect(),
+                    state: Rc::clone(&state),
+                },
+                state,
+            )
+        }
+    }
+
+    struct FakePublisher {
+        connection_id: usize,
+        publish_results: VecDeque<io::Result<()>>,
+        state: Rc<RefCell<FakeFactoryState>>,
+    }
+
+    impl Publisher for FakePublisher {
+        fn publish(&mut self, topic: &str, payload: &[u8], retain: bool) -> io::Result<()> {
+            self.state
+                .borrow_mut()
+                .publish_attempts
+                .push(PublishAttempt {
+                    connection_id: self.connection_id,
+                    publish: mqtt::Publish {
+                        topic: topic.to_string(),
+                        payload: String::from_utf8(payload.to_vec())
+                            .expect("payload should be UTF-8"),
+                        retain,
+                    },
+                });
+
+            self.publish_results.pop_front().unwrap_or(Ok(()))
+        }
+    }
+
+    impl PublisherFactory for FakePublisherFactory {
+        type Client = FakePublisher;
+
+        fn connect(
+            &mut self,
+            _host: &str,
+            _port: u16,
+            _client_id: &str,
+        ) -> io::Result<Self::Client> {
+            let mut state = self.state.borrow_mut();
+            state.connect_attempts += 1;
+
+            match self.steps.pop_front().expect("missing fake connect step") {
+                ConnectStep::Ok { publish_results } => {
+                    let connection_id = state.next_connection_id;
+                    state.next_connection_id += 1;
+                    Ok(FakePublisher {
+                        connection_id,
+                        publish_results,
+                        state: Rc::clone(&self.state),
+                    })
+                }
+                ConnectStep::Err(kind) => Err(io::Error::from(kind)),
+            }
+        }
     }
 
     #[test]
@@ -510,5 +645,117 @@ mod tests {
         assert!(!slept);
         assert_eq!(published.len(), 3);
         assert!(published.iter().all(|msg| msg.retain));
+    }
+
+    #[test]
+    fn run_mqtt_loop_retries_connect_until_success() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(mqtt::Publish {
+            topic: "meters/main/energy_import".to_string(),
+            payload: "1.0".to_string(),
+            retain: false,
+        })
+        .unwrap();
+        drop(tx);
+
+        let (mut factory, state) = FakePublisherFactory::new([
+            ConnectStep::Err(io::ErrorKind::ConnectionRefused),
+            ConnectStep::Ok {
+                publish_results: VecDeque::from([Ok(())]),
+            },
+        ]);
+        let mut sleeps = Vec::new();
+
+        run_mqtt_loop_with(rx, "localhost", 1883, "client", &mut factory, |duration| {
+            sleeps.push(duration)
+        });
+
+        let state = state.borrow();
+        assert_eq!(sleeps, vec![Duration::from_secs(5)]);
+        assert_eq!(state.connect_attempts, 2);
+        assert_eq!(
+            state.publish_attempts,
+            vec![PublishAttempt {
+                connection_id: 0,
+                publish: mqtt::Publish {
+                    topic: "meters/main/energy_import".to_string(),
+                    payload: "1.0".to_string(),
+                    retain: false,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn run_mqtt_loop_reconnects_after_publish_failure() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(mqtt::Publish {
+            topic: "meters/main/energy_import".to_string(),
+            payload: "1.0".to_string(),
+            retain: false,
+        })
+        .unwrap();
+        tx.send(mqtt::Publish {
+            topic: "meters/main/power_total".to_string(),
+            payload: "2.0".to_string(),
+            retain: false,
+        })
+        .unwrap();
+        drop(tx);
+
+        let (mut factory, state) = FakePublisherFactory::new([
+            ConnectStep::Ok {
+                publish_results: VecDeque::from([Err(io::Error::from(io::ErrorKind::BrokenPipe))]),
+            },
+            ConnectStep::Ok {
+                publish_results: VecDeque::from([Ok(())]),
+            },
+        ]);
+
+        run_mqtt_loop_with(rx, "localhost", 1883, "client", &mut factory, |_| {});
+
+        let state = state.borrow();
+        assert_eq!(state.connect_attempts, 2);
+        assert_eq!(
+            state.publish_attempts,
+            vec![
+                PublishAttempt {
+                    connection_id: 0,
+                    publish: mqtt::Publish {
+                        topic: "meters/main/energy_import".to_string(),
+                        payload: "1.0".to_string(),
+                        retain: false,
+                    },
+                },
+                PublishAttempt {
+                    connection_id: 1,
+                    publish: mqtt::Publish {
+                        topic: "meters/main/power_total".to_string(),
+                        payload: "2.0".to_string(),
+                        retain: false,
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn run_mqtt_loop_exits_cleanly_when_channel_is_closed() {
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+
+        let (mut factory, state) = FakePublisherFactory::new([ConnectStep::Ok {
+            publish_results: VecDeque::new(),
+        }]);
+        let mut slept = false;
+
+        run_mqtt_loop_with(rx, "localhost", 1883, "client", &mut factory, |_| {
+            slept = true;
+        });
+
+        let state = state.borrow();
+        assert!(!slept);
+        assert_eq!(state.connect_attempts, 1);
+        assert!(state.publish_attempts.is_empty());
     }
 }
