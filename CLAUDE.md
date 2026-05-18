@@ -44,3 +44,9 @@ Threading: one sensor thread per entry in `config.yaml`, all feeding a single MQ
 cargo build
 cargo test
 ```
+
+## Commit Conventions
+
+- Use conventional commit messages.
+- Every commit message must include a `Co-authored-by` footer naming the concrete model used for the change.
+- Examples of concrete model names: `GPT-5.4`, `Sonnet 4.6`.

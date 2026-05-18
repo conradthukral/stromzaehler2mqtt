@@ -25,19 +25,7 @@ impl MqttClient {
     fn recv_connack(&mut self) -> std::io::Result<()> {
         let mut buf = [0u8; 4];
         self.stream.read_exact(&mut buf)?;
-        if buf[0] != 0x20 || buf[1] != 0x02 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("expected CONNACK, got {:#04x}", buf[0]),
-            ));
-        }
-        if buf[3] != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                format!("CONNACK return code {}", buf[3]),
-            ));
-        }
-        Ok(())
+        parse_connack(buf)
     }
 
     pub fn publish(&mut self, topic: &str, payload: &[u8], retain: bool) -> std::io::Result<()> {
@@ -60,6 +48,22 @@ fn connect_packet(client_id: &str) -> Vec<u8> {
     pkt.push(id.len() as u8);
     pkt.extend_from_slice(id);
     pkt
+}
+
+fn parse_connack(buf: [u8; 4]) -> std::io::Result<()> {
+    if buf[0] != 0x20 || buf[1] != 0x02 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("expected CONNACK, got {:#04x}", buf[0]),
+        ));
+    }
+    if buf[3] != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            format!("CONNACK return code {}", buf[3]),
+        ));
+    }
+    Ok(())
 }
 
 fn publish_packet(topic: &str, payload: &[u8], retain: bool) -> Vec<u8> {
@@ -147,5 +151,25 @@ mod tests {
             publish_packet("a/b", b"1", true),
             &[0x31, 0x06, 0x00, 0x03, b'a', b'/', b'b', b'1']
         );
+    }
+
+    #[test]
+    fn parse_connack_accepts_success_packet() {
+        assert!(parse_connack([0x20, 0x02, 0x00, 0x00]).is_ok());
+    }
+
+    #[test]
+    fn parse_connack_rejects_invalid_header() {
+        let err = parse_connack([0x21, 0x02, 0x00, 0x00]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+
+        let err = parse_connack([0x20, 0x03, 0x00, 0x00]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn parse_connack_rejects_broker_refusal() {
+        let err = parse_connack([0x20, 0x02, 0x00, 0x05]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ConnectionRefused);
     }
 }
