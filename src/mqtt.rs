@@ -167,25 +167,23 @@ mod tests {
 
     #[test]
     fn discovery_entries_count_and_topics() {
-        let sensor = Sensor::new("main", "stromzaehler2mqtt", "EBZ5DD32R06ETA_107");
+        let sensor = Sensor::new("main", "stromzaehler2mqtt", "1EBZ0102834567");
         let entries = discovery_entries(&sensor, "stromzaehler2mqtt");
-        assert_eq!(entries.len(), 3);
-
-        let topics: Vec<&str> = entries.iter().map(|(t, _)| t.as_str()).collect();
-        assert!(topics.contains(
-            &"homeassistant/sensor/stromzaehler2mqtt/main_ebz5dd32r06eta_107_energy_import/config"
-        ));
-        assert!(topics.contains(
-            &"homeassistant/sensor/stromzaehler2mqtt/main_ebz5dd32r06eta_107_energy_export/config"
-        ));
-        assert!(topics.contains(
-            &"homeassistant/sensor/stromzaehler2mqtt/main_ebz5dd32r06eta_107_power_total/config"
-        ));
+        let mut topics: Vec<&str> = entries.iter().map(|(t, _)| t.as_str()).collect();
+        topics.sort_unstable();
+        assert_eq!(
+            topics,
+            [
+                "homeassistant/sensor/stromzaehler2mqtt/main_1ebz0102834567_energy_export/config",
+                "homeassistant/sensor/stromzaehler2mqtt/main_1ebz0102834567_energy_import/config",
+                "homeassistant/sensor/stromzaehler2mqtt/main_1ebz0102834567_power_total/config",
+            ]
+        );
     }
 
     #[test]
     fn discovery_payload_fields() {
-        let sensor = Sensor::new("main", "stromzaehler2mqtt", "EBZ5DD32R06ETA_107");
+        let sensor = Sensor::new("main", "stromzaehler2mqtt", "1EBZ0102834567");
         let entries = discovery_entries(&sensor, "stromzaehler2mqtt");
         let (_, payload_json) = entries
             .iter()
@@ -197,14 +195,14 @@ mod tests {
         assert_eq!(v["state_class"], "total_increasing");
         assert_eq!(v["unit_of_measurement"], "kWh");
         assert_eq!(v["state_topic"], "stromzaehler2mqtt/main/energy_import");
-        assert_eq!(v["unique_id"], "main_ebz5dd32r06eta_107_energy_import");
+        assert_eq!(v["unique_id"], "main_1ebz0102834567_energy_import");
         assert_eq!(v["device"]["name"], "main");
-        assert_eq!(v["device"]["identifiers"][0], "main_ebz5dd32r06eta_107");
+        assert_eq!(v["device"]["identifiers"][0], "main_1ebz0102834567");
     }
 
     #[test]
     fn discovery_publishes_are_retained_and_match_entries() {
-        let sensor = Sensor::new("main", "stromzaehler2mqtt", "EBZ5DD32R06ETA_107");
+        let sensor = Sensor::new("main", "stromzaehler2mqtt", "1EBZ0102834567");
 
         let publishes = discovery_publishes(&sensor, "stromzaehler2mqtt");
 
@@ -212,13 +210,13 @@ mod tests {
         assert!(publishes.iter().all(|publish| publish.retain));
         assert_eq!(
             publishes[0].topic,
-            "homeassistant/sensor/stromzaehler2mqtt/main_ebz5dd32r06eta_107_energy_import/config"
+            "homeassistant/sensor/stromzaehler2mqtt/main_1ebz0102834567_energy_import/config"
         );
     }
 
     #[test]
     fn reading_publishes_only_emit_supported_readings_without_retain() {
-        let sensor = Sensor::new("main", "stromzaehler2mqtt", "EBZ5DD32R06ETA_107");
+        let sensor = Sensor::new("main", "stromzaehler2mqtt", "1EBZ0102834567");
         let telegram = Telegram {
             device_id: "EBZ5DD32R06ETA_107".into(),
             readings: vec![
