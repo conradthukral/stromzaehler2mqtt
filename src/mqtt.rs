@@ -88,16 +88,6 @@ fn sanitize_topic_segment(s: &str) -> String {
         .collect()
 }
 
-/// Returns the MQTT state topic suffix and payload for a reading, or None if not published.
-fn reading_to_state(reading: &Reading) -> Option<(&'static str, String)> {
-    match reading {
-        Reading::EnergyImport(v) => Some(("energy_import", v.to_string())),
-        Reading::EnergyExport(v) => Some(("energy_export", v.to_string())),
-        Reading::PowerTotal(v) => Some(("power_total", v.to_string())),
-        _ => None,
-    }
-}
-
 /// Returns (config_topic, payload_json) pairs for all discovery entries.
 fn discovery_entries(sensor: &Sensor, node_id: &str) -> Vec<(String, String)> {
     let device_key = sensor.device_key();
@@ -134,18 +124,26 @@ pub fn discovery_publishes(sensor: &Sensor, node_id: &str) -> Vec<Publish> {
         .collect()
 }
 
+/// Returns the MQTT publish message for a reading, or None if not published.
+fn reading_to_publish(sensor: &Sensor, reading: &Reading) -> Option<Publish> {
+    let (subtopic, payload) = match reading {
+        Reading::EnergyImport(v) => ("energy_import", v.to_string()),
+        Reading::EnergyExport(v) => ("energy_export", v.to_string()),
+        Reading::PowerTotal(v) => ("power_total", v.to_string()),
+        _ => return None,
+    };
+    Some(Publish {
+        topic: sensor.value_topic(subtopic),
+        payload,
+        retain: false,
+    })
+}
+
 pub fn reading_publishes(sensor: &Sensor, telegram: &Telegram) -> Vec<Publish> {
     telegram
         .readings
         .iter()
-        .filter_map(|reading| {
-            let (subtopic, value) = reading_to_state(reading)?;
-            Some(Publish {
-                topic: sensor.value_topic(subtopic),
-                payload: value,
-                retain: false,
-            })
-        })
+        .filter_map(|reading| reading_to_publish(sensor, reading))
         .collect()
 }
 
@@ -165,41 +163,6 @@ mod tests {
         assert_eq!(sanitize_topic_segment("Küche"), "kueche");
         assert_eq!(sanitize_topic_segment("ÜBER"), "ueber");
         assert_eq!(sanitize_topic_segment("Straße"), "strasse");
-    }
-
-    #[test]
-    fn reading_to_state_published_variants() {
-        let cases = [
-            (Reading::EnergyImport(2714.128), "energy_import", "2714.128"),
-            (Reading::EnergyExport(1.206), "energy_export", "1.206"),
-            (Reading::PowerTotal(211.26), "power_total", "211.26"),
-        ];
-        for (reading, expected_subtopic, expected_value) in cases {
-            let (subtopic, value) = reading_to_state(&reading).expect("should be Some");
-            assert_eq!(subtopic, expected_subtopic);
-            assert_eq!(value, expected_value);
-        }
-    }
-
-    #[test]
-    fn reading_to_state_skipped_variants() {
-        let skipped = [
-            Reading::MeterId("x".into()),
-            Reading::SerialNumber("x".into()),
-            Reading::StatusFlags(0),
-            Reading::OperatingTime(0),
-            Reading::PowerL1(0.0),
-            Reading::PowerL2(0.0),
-            Reading::PowerL3(0.0),
-            Reading::Unknown {
-                code: "x".into(),
-                value: "y".into(),
-                unit: None,
-            },
-        ];
-        for r in &skipped {
-            assert!(reading_to_state(r).is_none(), "{r} should be skipped");
-        }
     }
 
     #[test]
@@ -262,7 +225,13 @@ mod tests {
                 Reading::EnergyImport(2714.128),
                 Reading::EnergyExport(1.206),
                 Reading::PowerTotal(211.26),
+                Reading::MeterId("meter".into()),
+                Reading::SerialNumber("serial".into()),
+                Reading::StatusFlags(0),
+                Reading::OperatingTime(0),
                 Reading::PowerL1(157.64),
+                Reading::PowerL2(0.0),
+                Reading::PowerL3(0.0),
                 Reading::Unknown {
                     code: "1-0:99.9.9*255".into(),
                     value: "ignored".into(),

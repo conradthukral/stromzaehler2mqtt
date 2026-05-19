@@ -588,9 +588,10 @@ mod tests {
 
         assert_eq!(sleeps, vec![PUBLISH_INTERVAL]);
         assert_eq!(published.len(), 6);
-        assert!(published.iter().take(3).all(|msg| msg
-            .topic
-            .starts_with("homeassistant/sensor/stromzaehler2mqtt/")));
+        assert!(published.iter().take(3).all(|msg| {
+            msg.topic
+                .starts_with("homeassistant/sensor/stromzaehler2mqtt/")
+        }));
         assert_eq!(
             published[3..],
             [
